@@ -41,7 +41,7 @@ class EnhancedGridView(QWidget):
 
         # 設定
         self.columns = 4
-        self.page_size = 32
+        self.page_size = 64  # 一度に表示する画像の数
         self.current_page = 0
         self.total_pages = 0
         self.thumbnail_size = QSize(150, 150)
@@ -222,7 +222,7 @@ class EnhancedGridView(QWidget):
 
         # 表示領域を取得 (少し上下に余裕を持たせる)
         viewport = self.scroll_area.viewport()
-        visible_rect = viewport.rect().adjusted(0, -self.thumbnail_size.height(), 0, self.thumbnail_size.height())
+        visible_rect = viewport.rect().adjusted(0, -viewport.height(), 0, viewport.height())
 
         labels_to_load = []
         for image_path, label in self.image_labels.items():

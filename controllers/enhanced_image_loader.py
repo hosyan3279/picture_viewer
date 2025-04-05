@@ -7,8 +7,9 @@ import os
 from PySide6.QtCore import QObject, Signal, Slot, QSize, QThread, QMutex
 from PySide6.QtGui import QPixmap, Qt
 
-from ..controllers.workers import FolderScanWorker, ThumbnailWorker
-from .directory_scanner import DirectoryScannerWorker # DirectoryScannerWorkerを使う
+from ..controllers.workers import FolderScanWorker
+from .directory_scanner import DirectoryScannerWorker
+from .vips_thumbnail_worker import VipsThumbnailWorker  # 新しいlibvipsベースのサムネイルワーカー
 
 class ThumbnailRequest:
     """サムネイルリクエストを表すクラス"""
@@ -32,13 +33,13 @@ class EnhancedImageLoader(QObject):
     効率的な画像の読み込みと処理を管理するクラス
     
     キャッシュの活用、優先度ベースの処理、バッチ処理を行います。
+    libvipsを使用した高速サムネイル生成に対応しています。
     """
     # シグナル定義
     progress_updated = Signal(int)
     loading_finished = Signal()
     thumbnail_created = Signal(str, object)  # (image_path, thumbnail)
     error_occurred = Signal(str)
-    progress_updated = Signal(int) # 進捗シグナルを追加
     
     def __init__(self, image_model, thumbnail_cache, worker_manager):
         """
@@ -64,6 +65,8 @@ class EnhancedImageLoader(QObject):
         self.active_requests = set()
         self.request_mutex = QMutex()
         
+        # 同時処理数を増やす（libvipsの高速処理を活かすため）
+        self.max_concurrent_requests = 8  # 通常は4だが、libvipsの効率を考慮して増加
     
     def load_images_from_folder(self, folder_path):
         """
@@ -77,14 +80,14 @@ class EnhancedImageLoader(QObject):
 
         # タスクカウンターをリセット
         self.completed_tasks = 0
-        self.total_tasks = 0 # total_tasksはここで設定しない方が良いかも
+        self.total_tasks = 0
 
         # 画像ファイルを検索 (DirectoryScannerWorker を使用)
-        worker = DirectoryScannerWorker(folder_path) # 高速なスキャナを使用
+        worker = DirectoryScannerWorker(folder_path)
 
         worker.signals.result.connect(self.process_file_list)
         worker.signals.error.connect(self.handle_error)
-        worker.signals.progress.connect(self.progress_updated) # 進捗を接続
+        worker.signals.progress.connect(self.progress_updated)
         self.worker_manager.start_worker("folder_scan", worker)
 
     def process_file_list(self, file_list):
@@ -97,14 +100,12 @@ class EnhancedImageLoader(QObject):
         # 結果が空の場合
         if not file_list:
             self.error_occurred.emit("フォルダ内に画像ファイルが見つかりませんでした")
-            # 空でも完了シグナルは出す（UI更新のため）
-            # self.image_model.clear() # load_images_from_folderで既にクリア済み
             self.loading_finished.emit()
             return
 
         print(f"DEBUG: Processing {len(file_list)} files found by scanner.")
         # 画像モデルにファイルを追加 (バッチ処理)
-        self.image_model.add_images_batch(file_list) # バッチで追加 (内部でdata_changed発行)
+        self.image_model.add_images_batch(file_list)
         print(f"DEBUG: Files added to model. Total images: {self.image_model.image_count()}")
 
         # フォルダスキャンとモデルへの追加が完了したことを通知
@@ -112,39 +113,6 @@ class EnhancedImageLoader(QObject):
 
     @Slot(str, QSize)
     def request_thumbnail(self, image_path, size, priority=0):
-        # (変更なし)
-        # まずはキャッシュをチェック
-        thumbnail_size = (size.width(), size.height())
-        cached_thumbnail = self.thumbnail_cache.get_thumbnail(image_path, thumbnail_size)
-
-        if cached_thumbnail:
-            # キャッシュにあればすぐに返す
-            self.thumbnail_created.emit(image_path, cached_thumbnail)
-            return
-
-        # キャッシュになければリクエストを追加
-        self.request_mutex.lock()
-        try:
-            # 既に同じパスのリクエストがあるか確認
-            for i, req in enumerate(self.pending_requests):
-                if req.image_path == image_path and req.size == size:
-                    # 優先度を更新
-                    self.pending_requests[i].priority = max(self.pending_requests[i].priority, priority)
-                    # 既存リクエストが見つかったらソートし直す必要があるかも
-                    self.pending_requests.sort(key=lambda r: -r.priority)
-                    return # 新しいリクエストは追加しない
-
-            # 新しいリクエストを追加
-            request = ThumbnailRequest(image_path, size, priority)
-            self.pending_requests.append(request)
-
-            # 優先度順にソート
-            self.pending_requests.sort(key=lambda req: -req.priority)
-        finally:
-            self.request_mutex.unlock()
-
-        # リクエスト処理を開始 (キューに余裕があれば)
-        self._process_next_request()
         """
         サムネイルをリクエスト
         
@@ -167,9 +135,11 @@ class EnhancedImageLoader(QObject):
         try:
             # 既に同じパスのリクエストがあるか確認
             for i, req in enumerate(self.pending_requests):
-                if req.image_path == image_path and req.size == size:
+                if req.image_path == image_path and req.size.width() == size.width() and req.size.height() == size.height():
                     # 優先度を更新
                     self.pending_requests[i].priority = max(self.pending_requests[i].priority, priority)
+                    # 既存リクエストが見つかったらソートし直す
+                    self.pending_requests.sort(key=lambda r: -r.priority)
                     return
             
             # 新しいリクエストを追加
@@ -184,11 +154,10 @@ class EnhancedImageLoader(QObject):
         # リクエスト処理を開始
         self._process_next_request()
     
-    
     def _process_next_request(self):
         """次のサムネイルリクエストを処理"""
         # 現在処理中のリクエストが多すぎる場合は待機
-        if len(self.active_requests) >= 4:
+        if len(self.active_requests) >= self.max_concurrent_requests:
             return
         
         # 次のリクエストを取得
@@ -203,9 +172,9 @@ class EnhancedImageLoader(QObject):
         finally:
             self.request_mutex.unlock()
         
-        # サムネイル生成ワーカーを作成
+        # libvipsを使用したサムネイル生成ワーカーを作成
         size = (request.size.width(), request.size.height())
-        worker = ThumbnailWorker(request.image_path, size, self.thumbnail_cache)
+        worker = VipsThumbnailWorker(request.image_path, size, self.thumbnail_cache)
         worker.signals.result.connect(lambda result: self.on_thumbnail_created(result, request))
         worker.signals.error.connect(lambda error: self.on_thumbnail_error(error, request))
         self.worker_manager.start_worker(f"thumbnail_{request.image_path}", worker)
@@ -245,8 +214,6 @@ class EnhancedImageLoader(QObject):
         
         # 次のリクエストを処理
         self._process_next_request()
-    
-    
     
     def handle_error(self, error_message):
         """

@@ -4,20 +4,21 @@
 画像の一括処理を行うクラスを提供します。
 """
 from PySide6.QtCore import QObject, Signal, Slot, QTimer
-from ..controllers.workers import ThumbnailWorker
+from .vips_thumbnail_worker import VipsThumbnailWorker  # libvipsを使用したサムネイル生成ワーカー
 
 class BatchProcessor(QObject):
     """
     画像の一括処理を行うクラス
     
     大量の画像をバッチ単位で効率的に処理します。
+    libvipsを使用した高速サムネイル生成に対応しています。
     """
     # シグナル定義
     batch_progress = Signal(int, int)  # (processed_count, total_count)
     batch_completed = Signal()
     thumbnail_created = Signal(str, object)  # (image_path, thumbnail)
     
-    def __init__(self, worker_manager, thumbnail_cache, batch_size=10, max_concurrent=4):
+    def __init__(self, worker_manager, thumbnail_cache, batch_size=20, max_concurrent=8):
         """
         初期化
         
@@ -30,8 +31,8 @@ class BatchProcessor(QObject):
         super().__init__()
         self.worker_manager = worker_manager
         self.thumbnail_cache = thumbnail_cache
-        self.batch_size = batch_size
-        self.max_concurrent = max_concurrent
+        self.batch_size = batch_size  # バッチサイズを増加（libvipsの高速処理を活かすため）
+        self.max_concurrent = max_concurrent  # 並列度を増加（libvipsの高速処理を活かすため）
         
         # 処理状態
         self.queue = []  # 処理待ちの画像パスのリスト
@@ -103,8 +104,8 @@ class BatchProcessor(QObject):
             # 処理中に追加
             self.processing.add(image_path)
             
-            # ワーカーを作成
-            worker = ThumbnailWorker(image_path, self.thumbnail_size, self.thumbnail_cache)
+            # libvipsを使用したワーカーを作成
+            worker = VipsThumbnailWorker(image_path, self.thumbnail_size, self.thumbnail_cache)
             
             # シグナルを接続
             worker.signals.result.connect(self._on_thumbnail_created)
