@@ -1,28 +1,31 @@
 """
-メインウィンドウモジュール
+メインウィンドウモジュール - 改良版
 
 アプリケーションのメインウィンドウを提供します。
+レスポンシブUIデザインを適用しています。
 """
 import os
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QStatusBar,
-    QToolBar, QStyle
+    QToolBar, QStyle, QTabWidget, QVBoxLayout, QWidget
 )
 from PySide6.QtGui import QAction, QKeySequence, QIcon
 from PySide6.QtCore import Qt, Slot
 
-from ..models.image_model import ImageModel
-from ..models.enhanced_thumbnail_cache import EnhancedThumbnailCache
-from ..controllers.worker_manager import WorkerManager
-from ..controllers.enhanced_image_loader import EnhancedImageLoader
-from .enhanced_grid_view import EnhancedGridView
-from ..controllers.directory_scanner import DirectoryScannerWorker # 確認用インポート
+from models.image_model import ImageModel
+from models.enhanced_thumbnail_cache import EnhancedThumbnailCache
+from controllers.worker_manager import WorkerManager
+from controllers.enhanced_image_loader import EnhancedImageLoader
+from views.enhanced_grid_view import EnhancedGridView
+from views.flow_grid_view import FlowGridView
+from controllers.directory_scanner import DirectoryScannerWorker
 
 class MainWindow(QMainWindow):
     """
     アプリケーションのメインウィンドウ
     
-    メニュー、ツールバー、ステータスバー、および中央ウィジェットを管理します。
+    メニュー、ツールバー、ステータスバー、およびタブ形式の中央ウィジェットを管理します。
+    レスポンシブなグリッドビューとフローレイアウトを使用したビューを提供します。
     """
     
     def __init__(self):
@@ -50,21 +53,30 @@ class MainWindow(QMainWindow):
     
     def setup_ui(self):
         """UIコンポーネントを設定"""
-        # ステータスバーの設定
+    # ステータスバーの設定
         self.statusBar().showMessage("準備完了")
-        
-        # メニューバーの設定
-        self.create_menus()
-        
-        # ツールバーの設定
-        self.create_toolbars()
-        
-        # 中央ウィジェットの設定（拡張グリッドビューを使用）
-        self.image_grid_view = EnhancedGridView(
+    
+    # タブウィジェットの作成
+        self.tab_widget = QTabWidget()
+        self.setCentralWidget(self.tab_widget)
+    
+    # 拡張グリッドビューの作成
+        self.grid_view = EnhancedGridView(
             self.image_model,
             self.worker_manager
-        )
-        self.setCentralWidget(self.image_grid_view)
+    )
+        self.tab_widget.addTab(self.grid_view, "グリッドビュー")
+    
+    # フローグリッドビューの作成
+        self.flow_view = FlowGridView(
+        self.image_model,
+        self.worker_manager
+    )
+        self.tab_widget.addTab(self.flow_view, "フロービュー")
+    
+    # メニューバーとツールバーの設定（タブ作成後に移動）
+        self.create_menus()
+        self.create_toolbars()
     
     def create_menus(self):
         """メニューを作成"""
@@ -106,6 +118,25 @@ class MainWindow(QMainWindow):
         refresh_action.setShortcut(QKeySequence("F5"))
         refresh_action.triggered.connect(self.refresh_view)
         view_menu.addAction(refresh_action)
+        
+        # ビュータイプのサブメニュー
+        view_type_menu = view_menu.addMenu("ビュータイプ")
+        
+        # グリッドビューアクション
+        grid_view_action = QAction("グリッドビュー", self)
+        grid_view_action.setCheckable(True)
+        grid_view_action.setChecked(True)
+        grid_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(0))
+        view_type_menu.addAction(grid_view_action)
+        
+        # フロービューアクション
+        flow_view_action = QAction("フロービュー", self)
+        flow_view_action.setCheckable(True)
+        flow_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
+        view_type_menu.addAction(flow_view_action)
+        
+        # タブが変更されたときにアクションを同期
+        self.tab_widget.currentChanged.connect(lambda idx: self.sync_view_actions(grid_view_action, flow_view_action, idx))
     
     def create_toolbars(self):
         """ツールバーを作成"""
@@ -119,6 +150,21 @@ class MainWindow(QMainWindow):
         # 標準アイコンを使用
         open_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
         main_toolbar.addAction(open_action)
+        
+        # ビュー切り替えアクション
+        main_toolbar.addSeparator()
+        
+        # グリッドビューアクション
+        grid_view_action = QAction("グリッドビュー", self)
+        grid_view_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogListView))
+        grid_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(0))
+        main_toolbar.addAction(grid_view_action)
+        
+        # フロービューアクション
+        flow_view_action = QAction("フロービュー", self)
+        flow_view_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        flow_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
+        main_toolbar.addAction(flow_view_action)
     
     def setup_connections(self):
         """シグナル/スロット接続を設定"""
@@ -129,8 +175,21 @@ class MainWindow(QMainWindow):
         self.image_loader.progress_updated.connect(self.update_progress) # 進捗シグナルを接続
 
         # イメージグリッドビューの接続
-        self.image_grid_view.image_selected.connect(self.show_image_details)
-        self.image_grid_view.thumbnail_needed.connect(self.image_loader.request_thumbnail)
+        self.grid_view.image_selected.connect(self.show_image_details)
+        self.grid_view.thumbnail_needed.connect(self.image_loader.request_thumbnail)
+        
+        # フロービューの接続
+        self.flow_view.image_selected.connect(self.show_image_details)
+        self.flow_view.thumbnail_needed.connect(self.image_loader.request_thumbnail)
+
+    def sync_view_actions(self, grid_action, flow_action, index):
+        """ビューアクションの選択状態をタブと同期"""
+        if index == 0:
+            grid_action.setChecked(True)
+            flow_action.setChecked(False)
+        else:
+            grid_action.setChecked(False)
+            flow_action.setChecked(True)
 
     @Slot()
     def open_folder(self):
@@ -138,7 +197,7 @@ class MainWindow(QMainWindow):
         folder_path = QFileDialog.getExistingDirectory(self, "フォルダを選択")
         if folder_path:
             self.statusBar().showMessage(f"フォルダスキャン開始: {os.path.basename(folder_path)}...")
-            # 以前のワーカーが動いていたらキャンセルする方が良いかも
+            # 以前のワーカーが動いていたらキャンセルする
             self.worker_manager.cancel_worker("folder_scan")
             self.image_loader.load_images_from_folder(folder_path)
 
@@ -156,10 +215,7 @@ class MainWindow(QMainWindow):
     def loading_finished(self):
         """フォルダスキャンとモデル更新完了時の処理"""
         count = self.image_model.image_count()
-        # この時点ではGridViewの表示更新は始まっているはず (data_changed経由)
         self.statusBar().showMessage(f"{count}枚の画像を検出しました。サムネイル表示中...")
-        # 必要であれば、ここでGridViewに明示的な更新指示を出すことも可能だが、
-        # 通常はImageModelのdata_changedシグナルで十分なはず。
 
     @Slot(str, object)
     def update_thumbnail(self, image_path, thumbnail):
@@ -170,7 +226,9 @@ class MainWindow(QMainWindow):
             image_path (str): 画像のパス
             thumbnail: サムネイル画像 (QPixmap)
         """
-        self.image_grid_view.update_thumbnail(image_path, thumbnail)
+        # 現在のタブに応じて、対応するビューにサムネイルを送信
+        self.grid_view.update_thumbnail(image_path, thumbnail)
+        self.flow_view.update_thumbnail(image_path, thumbnail)
 
     @Slot(str)
     def show_error(self, message):
@@ -225,4 +283,9 @@ class MainWindow(QMainWindow):
     @Slot()
     def refresh_view(self):
         """表示を更新"""
-        self.image_grid_view.refresh()
+        # 現在のタブに応じて、対応するビューをリフレッシュ
+        current_index = self.tab_widget.currentIndex()
+        if current_index == 0:
+            self.grid_view.refresh()
+        else:
+            self.flow_view.refresh()

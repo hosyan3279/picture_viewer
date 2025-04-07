@@ -7,7 +7,7 @@ import os
 from PySide6.QtCore import QObject, Signal, Slot, QSize, QThread, QMutex
 from PySide6.QtGui import QPixmap, Qt
 
-from ..controllers.workers import FolderScanWorker
+from controllers.workers import FolderScanWorker
 from .directory_scanner import DirectoryScannerWorker
 from .vips_thumbnail_worker import VipsThumbnailWorker  # 新しいlibvipsベースのサムネイルワーカー
 
