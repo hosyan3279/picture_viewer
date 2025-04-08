@@ -3,14 +3,13 @@
 
 サムネイル画像をグリッド形式で表示するビュークラスを提供します。
 """
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, 
-    QGridLayout, QLabel, QPushButton, QSizePolicy
-)
-from PySide6.QtCore import Qt, Signal, QTimer, QRect, QSize
-from PySide6.QtGui import QPixmap, QResizeEvent
+from PySide6.QtWidgets import QLabel, QGridLayout
+from PySide6.QtCore import Qt, QTimer, QRect
+from PySide6.QtGui import QResizeEvent
 
-class ImageGridView(QWidget):
+from .base_image_grid_view import BaseImageGridView
+
+class ImageGridView(BaseImageGridView):
     """
     サムネイル画像をグリッド形式で表示するビュークラス
     
@@ -18,8 +17,6 @@ class ImageGridView(QWidget):
     ページネーション機能とクリックイベントをサポートします。
     また、スクロール位置に応じた遅延読み込みを実装しています。
     """
-    # シグナル定義
-    image_selected = Signal(str)  # 選択された画像のパス
     
     def __init__(self, image_model, worker_manager, parent=None):
         """
@@ -30,110 +27,24 @@ class ImageGridView(QWidget):
             worker_manager: ワーカーマネージャー
             parent: 親ウィジェット
         """
-        super().__init__(parent)
-        self.image_model = image_model
-        self.worker_manager = worker_manager
-        self.columns = 4
-        self.page_size = 20
-        self.current_page = 0
-        self.total_pages = 0
-        self.image_labels = {}  # 画像パス → ラベルウィジェットのマッピング
-        self.loaded_images = set()  # すでに読み込まれた画像のパスのセット
-        self.scroll_debounce_timer = None  # スクロールのデバウンスタイマー
+        super().__init__(image_model, worker_manager, parent)
+        self.columns = 4  # 列数の初期値
         
-        # バッチ更新用の変数
-        self.pending_updates = {}  # 保留中の更新（画像パス -> サムネイル）
-        self.update_timer = QTimer()  # 定期的なUI更新タイマー
-        self.update_timer.setInterval(100)  # 100ms間隔で更新
-        self.update_timer.timeout.connect(self.apply_pending_updates)
-        self.update_timer.start()
+        # 基底クラスの設定を上書き
+        self.page_size = 20  # このビューでの一ページあたりの表示数
         
-        # UIコンポーネント
-        self.setup_ui()
-        
-        # モデルの変更を監視
-        self.image_model.data_changed.connect(self.refresh)
-    
-    def setup_ui(self):
-        """UIコンポーネントを設定"""
-        # メインレイアウト
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # スクロールエリア
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        
-        # スクロールイベントの追跡
-        self.scroll_area.verticalScrollBar().valueChanged.connect(self.on_scroll_changed)
-        
-        # 画像グリッドウィジェット
-        self.content_widget = QWidget()
-        self.content_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # グリッドレイアウトを作成
         self.grid_layout = QGridLayout(self.content_widget)
         self.grid_layout.setSpacing(10)  # ウィジェット間のスペースを設定
-        self.scroll_area.setWidget(self.content_widget)
-        
-        # ページネーションコントロール
-        page_controls = QHBoxLayout()
-        self.prev_button = QPushButton("前へ")
-        self.page_label = QLabel("0 / 0")
-        self.next_button = QPushButton("次へ")
-        
-        self.prev_button.clicked.connect(self.prev_page)
-        self.next_button.clicked.connect(self.next_page)
-        
-        page_controls.addWidget(self.prev_button)
-        page_controls.addWidget(self.page_label)
-        page_controls.addWidget(self.next_button)
-        page_controls.addStretch()
-        
-        # レイアウトに追加
-        layout.addWidget(self.scroll_area)
-        layout.addLayout(page_controls)
-        
-        # デフォルトでボタンを無効化
-        self.prev_button.setEnabled(False)
-        self.next_button.setEnabled(False)
-        
-        # スクロールのデバウンスタイマー
-        self.scroll_debounce_timer = QTimer()
-        self.scroll_debounce_timer.setSingleShot(True)
-        self.scroll_debounce_timer.timeout.connect(self.load_visible_images)
+        self.grid_layout.setContentsMargins(10, 10, 10, 10)
     
-    def refresh(self):
-        """表示を更新"""
-        # ページ数を更新
-        total_images = self.image_model.image_count()
-        self.total_pages = max(1, (total_images + self.page_size - 1) // self.page_size)
+    def place_images(self, images):
+        """
+        画像をグリッドに配置
         
-        # カレントページをリセット（必要に応じて）
-        if self.current_page >= self.total_pages:
-            self.current_page = max(0, self.total_pages - 1)
-        
-        # 読み込み済み画像のリストをクリア
-        self.loaded_images.clear()
-        
-        # 現在のページを表示
-        self.display_current_page()
-        
-        # ページコントロールを更新
-        self.update_page_controls()
-    
-    def display_current_page(self):
-        """現在のページを表示"""
-        # 既存のアイテムをクリア
-        self.clear_grid()
-        
-        # 画像がない場合は何もしない
-        if self.image_model.image_count() == 0:
-            return
-        
-        # 現在のページの画像を取得
-        start_idx = self.current_page * self.page_size
-        images = self.image_model.get_images_batch(start_idx, self.page_size)
-        
-        # グリッドに画像を配置
+        Args:
+            images (list): 画像パスのリスト
+        """
         for i, image_path in enumerate(images):
             row, col = divmod(i, self.columns)
             
@@ -158,37 +69,6 @@ class ImageGridView(QWidget):
             
             # マッピングを保存
             self.image_labels[image_path] = label
-        
-        # 遅延読み込みを開始
-        QTimer.singleShot(100, self.load_visible_images)
-    
-    def resizeEvent(self, event: QResizeEvent):
-        """ウィンドウリサイズ時にグリッドの列数を調整"""
-        super().resizeEvent(event)
-        
-        # 前の列数を保存
-        old_columns = self.columns
-        
-        # ウィンドウ幅に応じて列数を調整
-        width = event.size().width()
-        if width < 500:
-            self.columns = 2
-        elif width < 800:
-            self.columns = 3
-        elif width < 1200:
-            self.columns = 4
-        else:
-            self.columns = 5
-        
-        # 列数が変わった場合は再表示
-        if old_columns != self.columns and self.image_model.image_count() > 0:
-            self.display_current_page()
-    
-    def on_scroll_changed(self):
-        """スクロール位置が変更されたときの処理"""
-        # デバウンスのためにタイマーをリセット
-        self.scroll_debounce_timer.stop()
-        self.scroll_debounce_timer.start(200)  # 200ms後に実行
     
     def load_visible_images(self):
         """現在表示されている画像を読み込む"""
@@ -228,29 +108,8 @@ class ImageGridView(QWidget):
         # プレースホルダーを表示
         label.setText("読み込み中...")
         
-        # ワーカーを作成して読み込みを開始（最適化されたワーカーを使用）
-        from ..controllers.optimized_thumbnail_worker import OptimizedThumbnailWorker
-        from ..controllers.workers import ThumbnailWorker
-        worker = OptimizedThumbnailWorker(image_path, (140, 140))
-        
-        def on_thumbnail_created(result):
-            path, thumbnail = result
-            if path == label.image_path and not thumbnail.isNull():
-                # 直接更新する代わりに更新キューに追加
-                self.update_thumbnail(path, thumbnail)
-                label.setToolTip(path)
-        
-        worker.signals.result.connect(on_thumbnail_created)
-        self.worker_manager.start_worker(f"thumbnail_{image_path}", worker)
-    
-    def on_image_click(self, image_path):
-        """
-        画像クリック時の処理
-        
-        Args:
-            image_path (str): クリックされた画像のパス
-        """
-        self.image_selected.emit(image_path)
+        # サムネイル読み込みをリクエスト
+        self.thumbnail_needed.emit(image_path, self.thumbnail_size)
     
     def clear_grid(self):
         """グリッドをクリア"""
@@ -262,51 +121,15 @@ class ImageGridView(QWidget):
             if item and item.widget():
                 item.widget().deleteLater()
     
-    def prev_page(self):
-        """前のページに移動"""
-        print("DEBUG: prev_page called in image_grid_view", flush=True)
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.display_current_page()
-            self.update_page_controls()
-    
-    def next_page(self):
-        """次のページに移動"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self.display_current_page()
-            self.update_page_controls()
-    
-    def update_page_controls(self):
-        """ページコントロールを更新"""
-        self.page_label.setText(f"{self.current_page + 1} / {self.total_pages}")
-        
-        # ボタンの有効/無効状態を更新
-        self.prev_button.setEnabled(self.current_page > 0)
-        self.next_button.setEnabled(self.current_page < self.total_pages - 1)
-    
-    def update_thumbnail(self, image_path, thumbnail):
+    def process_updates(self, update_keys):
         """
-        特定の画像のサムネイルを更新
-        
-        更新はキューに追加され、バッチ処理されます。
+        サムネイル更新をバッチ処理
         
         Args:
-            image_path (str): 画像のパス
-            thumbnail (QPixmap): 新しいサムネイル
+            update_keys (list): 更新する画像パスのリスト
         """
-        # 更新をキューに追加（直接UIを更新せず）
-        self.pending_updates[image_path] = thumbnail
-    
-    def apply_pending_updates(self):
-        """保留中のサムネイル更新をバッチ処理で適用"""
-        # 保留中の更新が無ければ何もしない
-        if not self.pending_updates:
-            return
-        
         # バッチ処理でUI更新（最大20件ずつ処理）
         batch_count = 0
-        update_keys = list(self.pending_updates.keys())
         
         for image_path in update_keys:
             if batch_count >= 20:  # 1回の更新で最大20件まで
@@ -328,3 +151,25 @@ class ImageGridView(QWidget):
         # 更新があった場合はレイアウトを調整
         if batch_count > 0:
             self.update()
+    
+    def resizeEvent(self, event: QResizeEvent):
+        """ウィンドウリサイズ時にグリッドの列数を調整"""
+        super().resizeEvent(event)
+        
+        # 前の列数を保存
+        old_columns = self.columns
+        
+        # ウィンドウ幅に応じて列数を調整
+        width = event.size().width()
+        if width < 500:
+            self.columns = 2
+        elif width < 800:
+            self.columns = 3
+        elif width < 1200:
+            self.columns = 4
+        else:
+            self.columns = 5
+        
+        # 列数が変わった場合は再表示
+        if old_columns != self.columns and self.image_model.image_count() > 0:
+            self.display_current_page()

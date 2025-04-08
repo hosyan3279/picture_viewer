@@ -1,31 +1,26 @@
 """
-拡張グリッドビューモジュール - 改良版
+拡張グリッドビューモジュール
 
 効率的なサムネイル表示のための拡張グリッドビュークラスを提供します。
-ウィンドウサイズの変更に応じて動的に調整されます。
 """
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
-    QGridLayout, QLabel, QPushButton, QComboBox,
-    QSpacerItem, QSizePolicy, QFrame, QSlider
+    QLabel, QGridLayout, QHBoxLayout, QComboBox,
+    QSlider, QSizePolicy, QFrame
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QSize, QRect, QPoint
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QTimer, QSize, QRect, QPoint
+from PySide6.QtGui import QResizeEvent
 
+from .base_image_grid_view import BaseImageGridView
 from .lazy_image_label import LazyImageLabel
 
-class EnhancedGridView(QWidget):
+class EnhancedGridView(BaseImageGridView):
     """
     効率的なサムネイル表示のための拡張グリッドビュークラス
 
     遅延読み込みとスクロール連動による最適化機能を持つグリッドビュー。
     ページネーションと表示密度の調整にも対応しています。
-    ウィンドウサイズに応じて動的にレイアウトを調整します。
     """
-    # シグナル定義
-    image_selected = Signal(str)  # 選択された画像のパス
-    thumbnail_needed = Signal(str, QSize)  # サムネイルが必要なとき (image_path, size)
-
+    
     def __init__(self, image_model, worker_manager, parent=None):
         """
         初期化
@@ -35,15 +30,11 @@ class EnhancedGridView(QWidget):
             worker_manager: ワーカーマネージャー
             parent: 親ウィジェット
         """
-        super().__init__(parent)
-        self.image_model = image_model
-        self.worker_manager = worker_manager
-
+        super().__init__(image_model, worker_manager, parent)
+        
         # 設定
         self.columns = 4  # 初期列数
-        self.page_size = 64  # 一度に表示する画像の数
-        self.current_page = 0
-        self.total_pages = 0
+        self.page_size = 32  # 一度に表示する画像の数
         
         # サムネイルサイズの設定 (基本サイズ、最小、最大)
         self.base_thumbnail_sizes = {
@@ -55,8 +46,7 @@ class EnhancedGridView(QWidget):
         self.max_thumbnail_size = 300
         self.thumbnail_size = self.base_thumbnail_sizes[1]  # デフォルトは「中」
         
-        self.image_labels = {}  # 画像パス → ラベルウィジェットのマッピング
-        self.load_batch_size = 8  # 一度に読み込む画像の数を増やす
+        self.load_batch_size = 8  # 一度に読み込む画像の数
 
         # リサイズデバウンス用タイマー
         self.resize_timer = QTimer(self)
@@ -67,50 +57,29 @@ class EnhancedGridView(QWidget):
         # 最後のリサイズパラメータを保存
         self.last_width = 0
         self.pending_resize = False
+        
+        # スクロールエリアの設定
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
 
-        # UIコンポーネント
-        self.setup_ui()
-
-        # モデルの変更を監視
-        self.image_model.data_changed.connect(self.refresh)
+        # 拡張UIコンポーネント
+        self.setup_enhanced_ui()
 
         # 可視ラベルの読み込みを定期的にチェック
         self.load_timer = QTimer(self)
         self.load_timer.setInterval(150)  # 150ms間隔
         self.load_timer.timeout.connect(self.load_visible_thumbnails)
         self.load_timer.start()
-
-        # スクロールイベントにも接続してタイマーをリスタート
-        self.scroll_area.verticalScrollBar().valueChanged.connect(self.on_scroll_changed)
-        self.scroll_debounce_timer = QTimer(self)
-        self.scroll_debounce_timer.setSingleShot(True)
-        self.scroll_debounce_timer.setInterval(100) # スクロール後の待機時間
-        self.scroll_debounce_timer.timeout.connect(self.load_visible_thumbnails)
-
-    def setup_ui(self):
-        """UIコンポーネントを設定"""
-        # メインレイアウト
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # スクロールエリア
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        # スクロールエリアにスタイルを適用
-        self.scroll_area.setFrameShape(QFrame.NoFrame)
-
-        # 画像グリッドウィジェット
-        self.content_widget = QWidget()
+        
+        # グリッドレイアウトを作成
         self.grid_layout = QGridLayout(self.content_widget)
         self.grid_layout.setSpacing(5)
         self.grid_layout.setContentsMargins(10, 10, 10, 10)
-        self.scroll_area.setWidget(self.content_widget)
-
-        # 上部コントロールエリア
+    
+    def setup_enhanced_ui(self):
+        """拡張UIコンポーネントを設定"""
+        # 上部コントロールエリアをレイアウトの最初に追加
         top_controls = QHBoxLayout()
+        self.layout().insertLayout(0, top_controls)
 
         # 表示密度選択
         density_label = QLabel("表示密度:")
@@ -119,7 +88,7 @@ class EnhancedGridView(QWidget):
         self.density_combo.setCurrentIndex(1)  # デフォルトは「中」
         self.density_combo.currentIndexChanged.connect(self.on_density_changed)
 
-        # ズームスライダー (新機能)
+        # ズームスライダー
         zoom_label = QLabel("ズーム:")
         self.zoom_slider = QSlider(Qt.Horizontal)
         self.zoom_slider.setMinimum(self.min_thumbnail_size)
@@ -140,66 +109,14 @@ class EnhancedGridView(QWidget):
         top_controls.addWidget(zoom_label)
         top_controls.addWidget(self.zoom_slider)
         top_controls.addStretch()
-
-        # ページネーションコントロール
-        page_controls = QHBoxLayout()
-        self.prev_button = QPushButton("前へ")
-        self.page_label = QLabel("0 / 0")
-        self.next_button = QPushButton("次へ")
-
-        self.prev_button.clicked.connect(self.prev_page)
-        self.next_button.clicked.connect(self.next_page)
-
-        page_controls.addWidget(self.prev_button)
-        page_controls.addWidget(self.page_label)
-        page_controls.addWidget(self.next_button)
-        page_controls.addStretch()
-
-        # レイアウトに追加
-        layout.addLayout(top_controls)
-        layout.addWidget(self.scroll_area)
-        layout.addLayout(page_controls)
-
-        # デフォルトでボタンを無効化
-        self.prev_button.setEnabled(False)
-        self.next_button.setEnabled(False)
-
-    def refresh(self):
-        """表示を更新"""
-        # ページ数を更新
-        total_images = self.image_model.image_count()
-        self.total_pages = max(1, (total_images + self.page_size - 1) // self.page_size)
-
-        # カレントページをリセット（必要に応じて）
-        if self.current_page >= self.total_pages:
-            self.current_page = max(0, self.total_pages - 1)
-
-        # 現在のページを表示
-        self.display_current_page()
-
-        # ページコントロールを更新
-        self.update_page_controls()
-
-    def display_current_page(self):
-        """現在のページを表示"""
-        print(f"DEBUG: display_current_page start, current_page={self.current_page}", flush=True)
-        # 既存のアイテムをクリア
-        self.clear_grid()
-
-        # 画像がない場合は何もしない
-        if self.image_model.image_count() == 0:
-            # 空の場合のメッセージ表示など（任意）
-            # placeholder_label = QLabel("画像がありません")
-            # placeholder_label.setAlignment(Qt.AlignCenter)
-            # self.grid_layout.addWidget(placeholder_label, 0, 0, 1, self.columns)
-            self.update_page_controls() # ページラベルを更新
-            return
-
-        # 現在のページの画像を取得
-        start_idx = self.current_page * self.page_size
-        images = self.image_model.get_images_batch(start_idx, self.page_size)
-
-        # グリッドに画像を配置
+    
+    def place_images(self, images):
+        """
+        画像をグリッドに配置
+        
+        Args:
+            images (list): 画像パスのリスト
+        """
         for i, image_path in enumerate(images):
             row, col = divmod(i, self.columns)
 
@@ -214,24 +131,7 @@ class EnhancedGridView(QWidget):
 
             # マッピングを保存
             self.image_labels[image_path] = label
-
-        # ウィジェットが配置された後に可視性チェックをトリガー
-        QTimer.singleShot(0, self.load_visible_thumbnails)
-        print(f"DEBUG: display_current_page end, num images={len(images)}", flush=True)
-
-    def on_image_click(self, image_path):
-        """
-        画像クリック時の処理
-
-        Args:
-            image_path (str): クリックされた画像のパス
-        """
-        self.image_selected.emit(image_path)
-
-    def on_scroll_changed(self):
-        """スクロール変更時の処理（デバウンス用）"""
-        self.scroll_debounce_timer.start() # タイマーをリスタート
-
+    
     def load_visible_thumbnails(self):
         """可視状態のサムネイルを読み込む"""
         if not self.image_labels:
@@ -239,14 +139,13 @@ class EnhancedGridView(QWidget):
 
         # 表示領域を取得 (少し上下に余裕を持たせる)
         viewport = self.scroll_area.viewport()
-        visible_rect = viewport.rect().adjusted(0, -viewport.height(), 0, viewport.height())
+        visible_rect = viewport.rect().adjusted(0, -self.thumbnail_size.height(), 0, self.thumbnail_size.height())
 
         labels_to_load = []
         for image_path, label in self.image_labels.items():
             # ラベルが有効か確認
             if not label or label.parent() is None:
-                 print(f"DEBUG: Skipping invalid label for {image_path}")
-                 continue
+                continue
 
             # 読み込み状態を確認
             if label.loading_state == LazyImageLabel.STATE_NOT_LOADED:
@@ -259,14 +158,12 @@ class EnhancedGridView(QWidget):
                         labels_to_load.append((image_path, label))
                 except RuntimeError as e:
                     # mapToでエラーが発生することがある（ウィジェット削除中など）
-                     print(f"DEBUG: Error mapping label for {image_path}: {e}")
-                     continue # エラーの場合はスキップ
+                    print(f"DEBUG: Error mapping label for {image_path}: {e}")
+                    continue # エラーの場合はスキップ
 
         # 読み込むラベルがなければ終了
         if not labels_to_load:
             return
-
-        print(f"DEBUG: Found {len(labels_to_load)} labels to load.", flush=True)
 
         # 指定数のラベルだけ読み込む
         load_count = 0
@@ -280,27 +177,9 @@ class EnhancedGridView(QWidget):
                 label.setLoadingState(LazyImageLabel.STATE_LOADING)
 
                 # サムネイル読み込みをリクエスト
-                print(f"DEBUG: Requesting thumbnail for {path}", flush=True)
                 self.thumbnail_needed.emit(path, self.thumbnail_size)
                 load_count += 1
-
-    def update_thumbnail(self, image_path, thumbnail):
-        """
-        特定の画像のサムネイルを更新
-
-        Args:
-            image_path (str): 画像のパス
-            thumbnail (QPixmap): 新しいサムネイル
-        """
-        if image_path in self.image_labels:
-            label = self.image_labels[image_path]
-            # ラベルが存在し、サムネイルが有効な場合のみ更新
-            if label and not thumbnail.isNull():
-                label.set_thumbnail(thumbnail)
-            elif label and thumbnail.isNull():
-                 print(f"DEBUG: Received null thumbnail for: {image_path}", flush=True)
-                 label.setLoadingState(LazyImageLabel.STATE_ERROR) # エラー状態にする
-
+    
     def clear_grid(self):
         """グリッドをクリア"""
         # 読み込みタイマーを一時停止
@@ -309,7 +188,7 @@ class EnhancedGridView(QWidget):
 
         self.image_labels.clear()
 
-        # グリッド内のすべてのウィジェットを安全に削除
+        # グリッド内のすべてのウィジェットを削除
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             widget = item.widget()
@@ -318,38 +197,39 @@ class EnhancedGridView(QWidget):
         
         # 読み込みタイマーを再開
         self.load_timer.start()
-
-    def prev_page(self):
-        """前のページに移動"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.display_current_page()
-            self.update_page_controls()
-
-            # スクロール位置をリセット
-            self.scroll_area.verticalScrollBar().setValue(0)
-
-    def next_page(self):
-        """次のページに移動"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self.display_current_page()
-            self.update_page_controls()
-
-            # スクロール位置をリセット
-            self.scroll_area.verticalScrollBar().setValue(0)
-
-    def update_page_controls(self):
-        """ページコントロールを更新"""
-        if self.image_model.image_count() > 0:
-            self.page_label.setText(f"{self.current_page + 1} / {self.total_pages}")
-            self.prev_button.setEnabled(self.current_page > 0)
-            self.next_button.setEnabled(self.current_page < self.total_pages - 1)
-        else:
-            self.page_label.setText("0 / 0")
-            self.prev_button.setEnabled(False)
-            self.next_button.setEnabled(False)
-
+    
+    def process_updates(self, update_keys):
+        """
+        サムネイル更新をバッチ処理
+        
+        Args:
+            update_keys (list): 更新する画像パスのリスト
+        """
+        batch_count = 0
+        
+        for image_path in update_keys:
+            if batch_count >= 10:  # 1回の更新で最大10件まで
+                break
+                
+            if image_path in self.image_labels:
+                thumbnail = self.pending_updates[image_path]
+                label = self.image_labels[image_path]
+                
+                # ラベルが存在し、サムネイルが有効な場合のみ更新
+                if label and not thumbnail.isNull():
+                    label.set_thumbnail(thumbnail)
+                    batch_count += 1
+                elif label and thumbnail.isNull():
+                    label.setLoadingState(LazyImageLabel.STATE_ERROR)
+                    batch_count += 1
+                
+                # 処理済みの項目を削除
+                del self.pending_updates[image_path]
+        
+        # 更新があった場合はレイアウトを調整
+        if batch_count > 0:
+            self.update()
+    
     def on_density_changed(self, index):
         """
         表示密度変更時の処理
@@ -361,21 +241,15 @@ class EnhancedGridView(QWidget):
         old_thumbnail_size = self.thumbnail_size
         
         # 基本サイズを取得
-        base_size = self.base_thumbnail_sizes[index]
-        
-        # ウィンドウサイズに基づいて実際のサイズを調整（オプション）
-        # adjusted_size = self.calculate_responsive_size(base_size)
+        self.thumbnail_size = self.base_thumbnail_sizes[index]
         
         if index == 0:  # 小
-            self.thumbnail_size = base_size
             self.columns = 6
             self.page_size = 48
         elif index == 1:  # 中
-            self.thumbnail_size = base_size
             self.columns = 4
             self.page_size = 32
         elif index == 2:  # 大
-            self.thumbnail_size = base_size
             self.columns = 3
             self.page_size = 24
             
@@ -394,7 +268,6 @@ class EnhancedGridView(QWidget):
             value (int): スライダーの値（サムネイルの幅）
         """
         # スライダードラッグ中は実際に適用せず、値の表示のみ更新
-        # 実際の適用はスライダーリリース時に行う
         pass
         
     def on_zoom_slider_released(self):
@@ -420,8 +293,6 @@ class EnhancedGridView(QWidget):
         width = self.width()
         
         # マージンとスペーシングを考慮して列数を計算
-        # (マージン 2*10 + 列間のスペース (columns-1)*5)
-        # サムネイルサイズに基づいて計算
         thumbnail_width = self.thumbnail_size.width()
         spacing = self.grid_layout.spacing()
         margins = self.grid_layout.contentsMargins()
@@ -476,7 +347,6 @@ class EnhancedGridView(QWidget):
         
         # 列数が変わった場合のみ更新
         if old_columns != self.columns:
-            print(f"DEBUG: Columns changed from {old_columns} to {self.columns}")
             self.refresh()
             
         self.pending_resize = False
