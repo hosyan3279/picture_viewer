@@ -160,3 +160,8 @@ picture_viewer/
 - **GPUアクセラレーション**: 対応環境ではGPUを活用した処理の高速化
 - **完全な非同期API**: async/awaitベースの完全な非同期API
 - **メモリ圧縮**: キャッシュアイテムのメモリ内圧縮機能
+- 
+
+
+
+icon - [Flaticon](https://www.flaticon.com/uicons)	
