@@ -1,12 +1,11 @@
-# --- START OF MODIFIED views/main_window.py ---
 import os
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QStatusBar,
     QToolBar, QStyle, QTabWidget, QVBoxLayout, QWidget,
-    QStackedWidget
+    QStackedWidget, QApplication
 )
-from PySide6.QtGui import QAction, QKeySequence, QIcon, QKeyEvent # QKeyEvent をインポート
-from PySide6.QtCore import Qt, Slot, QEvent, QTimer,QObject # QTimerも追加しておくと後で役立つかも
+from PySide6.QtGui import QAction, QKeySequence, QIcon, QKeyEvent, QShortcut
+from PySide6.QtCore import Qt, Slot, QEvent, QTimer, QObject
 from models.image_model import ImageModel
 from models.unified_thumbnail_cache import UnifiedThumbnailCache
 from controllers.worker_manager import WorkerManager
@@ -15,6 +14,66 @@ from views.enhanced_grid_view import EnhancedGridView
 from views.flow_grid_view import FlowGridView
 from views.single_image_view import SingleImageView # 正しいビュークラスをインポート
 from utils import logger, get_config
+
+class GlobalShortcutFilter(QObject):
+    """
+    アプリケーション全体のキーボードショートカットを処理するフィルタークラス
+    
+    特にフルスクリーンモードでのキーボードショートカットを確実に捕捉します。
+    """
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.main_window = parent
+    
+    def eventFilter(self, watched, event):
+        # キーイベントの場合のみ処理
+        if event.type() == QEvent.KeyPress:
+            if not isinstance(event, QKeyEvent):
+                return False
+                
+            # デバッグログを追加
+            key = event.key()
+            modifiers = event.modifiers()
+            logger.debug(f"GlobalShortcutFilter: KeyPress event - Key={key}, Modifiers={modifiers}")
+            
+            # フルスクリーン時のナビゲーションキー処理
+            if self.main_window.isFullScreen() and self.main_window.stacked_widget.currentIndex() == 1:
+                # 左矢印キー（前のページ）
+                if key == Qt.Key_Left:
+                    if hasattr(self.main_window, 'single_view_widget'):
+                        self.main_window.single_view_widget.show_previous_image()
+                        return True
+                
+                # 右矢印キー（次のページ）
+                elif key == Qt.Key_Right:
+                    if hasattr(self.main_window, 'single_view_widget'):
+                        self.main_window.single_view_widget.show_next_image()
+                        return True
+                
+                # Escキー（フルスクリーン解除）
+                elif key == Qt.Key_Escape:
+                    self.main_window.handle_fullscreen_toggle(False)
+                    return True
+                    
+                # スペースキー（スライドショー切り替え）
+                elif key == Qt.Key_Space:
+                    if hasattr(self.main_window, 'single_view_widget'):
+                        slideshow_action = self.main_window.single_view_widget.slideshow_action
+                        if slideshow_action:
+                            slideshow_action.toggle()
+                            return True
+                
+                # F11キー（フルスクリーン切り替え）
+                elif key == Qt.Key_F11:
+                    self.main_window.handle_fullscreen_toggle(not self.main_window.isFullScreen())
+                    return True
+            
+            # 通常のキー処理（必要に応じて）
+            # その他のグローバルショートカットがあれば追加
+                    
+        # イベントを処理しなかった場合は、次のフィルターに渡す
+        return super().eventFilter(watched, event)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -35,6 +94,10 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         self.setup_connections()
 
+        # グローバルショートカットフィルターを設定
+        self.global_shortcut_filter = GlobalShortcutFilter(self)
+        QApplication.instance().installEventFilter(self.global_shortcut_filter)
+        
         # --- イベントフィルターのインストール ---
         if hasattr(self, 'single_view_widget'):
             self.single_view_widget.installEventFilter(self)
@@ -261,26 +324,19 @@ class MainWindow(QMainWindow):
         # --- ウィンドウ状態の切り替えとフォーカス設定 ---
         if checked:
             logger.info("Entering fullscreen mode.")
+            # フルスクリーン前にフォーカスをリセット（任意）
+            self.setFocus()
+            
+            # フルスクリーン表示
             self.showFullScreen()
-            # ★★★ フルスクリーン後に single_view_widget.view にフォーカスを設定 ★★★
-            if hasattr(self, 'single_view_widget'):
-                if hasattr(self.single_view_widget, 'view') and self.single_view_widget.view:
-                    self.single_view_widget.view.setFocus(Qt.FocusReason.OtherFocusReason) # 理由を指定
-                    logger.debug("Set focus to single_view_widget.view")
-                else:
-                    # Fallback to the widget itself if view isn't available or accessible
-                    self.single_view_widget.setFocus(Qt.FocusReason.OtherFocusReason)
-                    logger.debug("Set focus to single_view_widget (fallback)")
+            
+            # フルスクリーン直後に明示的にフォーカスを設定
+            QTimer.singleShot(100, self._set_focus_after_fullscreen)
         else:
             logger.info("Exiting fullscreen mode.")
             self.showNormal()
-            # ★★★ 通常モードに戻った際にフォーカスを戻す (例: タブウィジェット) ★★★
-            if hasattr(self, 'tab_widget'):
-                 current_tab = self.tab_widget.currentWidget()
-                 if current_tab:
-                     current_tab.setFocus(Qt.FocusReason.OtherFocusReason)
-                     logger.debug("Set focus back to current tab widget")
-
+            # 通常モードに戻った際にフォーカスを設定
+            QTimer.singleShot(100, self._set_focus_after_normal)
 
         # --- アクション状態同期 ---
         if hasattr(self, 'single_view_widget') and hasattr(self.single_view_widget, 'fullscreen_action'):
@@ -290,6 +346,31 @@ class MainWindow(QMainWindow):
                        fullscreen_action.blockSignals(True)
                        fullscreen_action.setChecked(checked)
                        fullscreen_action.blockSignals(False)
+                       
+    def _set_focus_after_fullscreen(self):
+        """フルスクリーン後にフォーカスを正しく設定する"""
+        if hasattr(self, 'single_view_widget'):
+            if hasattr(self.single_view_widget, 'view') and self.single_view_widget.view:
+                self.single_view_widget.view.setFocus(Qt.FocusReason.OtherFocusReason)
+                logger.debug("Focus set to single_view_widget.view after fullscreen")
+                
+                # QGraphicsViewのフォーカスポリシーの調整（オプション）
+                self.single_view_widget.view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            else:
+                # フォールバック：ウィジェット自体にフォーカス
+                self.single_view_widget.setFocus(Qt.FocusReason.OtherFocusReason)
+                logger.debug("Focus set to single_view_widget (fallback)")
+    
+    def _set_focus_after_normal(self):
+        """通常モードに戻った後にフォーカスを設定する"""
+        if self.stacked_widget.currentIndex() == 0 and hasattr(self, 'tab_widget'):
+            current_tab = self.tab_widget.currentWidget()
+            if current_tab:
+                current_tab.setFocus(Qt.FocusReason.OtherFocusReason)
+                logger.debug("Focus set to current tab widget after normal mode")
+        elif self.stacked_widget.currentIndex() == 1 and hasattr(self, 'single_view_widget'):
+            self.single_view_widget.setFocus(Qt.FocusReason.OtherFocusReason)
+            logger.debug("Focus set to single_view_widget after normal mode")
 
     # --- イベントフィルター (変更なし) ---
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
@@ -409,5 +490,3 @@ class MainWindow(QMainWindow):
     # --- keyPressEvent を削除 ---
     # def keyPressEvent(self, event: QKeyEvent):
     #     # ... (このメソッド全体を削除またはコメントアウト) ...
-
-# --- END OF MODIFIED views/main_window.py ---

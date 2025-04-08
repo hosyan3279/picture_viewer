@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QToolBar, QSizePolicy, QLabel, QStatusBar, QPushButton, QStyle,
     QSpinBox, QWidgetAction
 )
-from PySide6.QtGui import QPixmap, QAction, QIcon, QKeyEvent, QWheelEvent, QPainter, QTransform, QKeySequence
+from PySide6.QtGui import QPixmap, QAction, QIcon, QKeyEvent, QWheelEvent, QPainter, QTransform, QKeySequence, QShortcut
 from PySide6.QtCore import Qt, Signal, Slot, QRectF, QTimer
 
 from models.image_model import ImageModel
@@ -101,7 +101,8 @@ class SingleImageView(QWidget):
         back_icon_path = os.path.join(icon_dir, "gallery.svg") # アイコンファイル名
         back_action = QAction(QIcon(back_icon_path), "ギャラリーへ戻る", self)
         back_action.triggered.connect(self.back_requested.emit)
-
+        back_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # <<<--- 追加：コンテキスト設定
+        
         self.toolbar.addAction(back_action)
         self.toolbar.addSeparator()
 
@@ -109,20 +110,28 @@ class SingleImageView(QWidget):
         prev_icon_path = os.path.join(icon_dir, "arrow-left.svg")
         self.prev_action = QAction(QIcon(prev_icon_path), "前へ", self)
         self.prev_action.triggered.connect(self.show_previous_image)
-        self.prev_action.setShortcut(Qt.Key.Key_Left)
-        self.prev_action.setShortcut(Qt.Key.Key_A)
-        self.prev_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut) # <<<--- コンテキスト設定
+        self.prev_action.setShortcut(QKeySequence(Qt.Key.Key_Left)) # 変更：明示的にQKeySequenceを使用
+        self.prev_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # 変更：アプリケーション全体に適用
         self.prev_action.setToolTip("前の画像を表示します (← or A)")
         self.toolbar.addAction(self.prev_action)
+        
+        # A キーにも対応（代替ショートカット）
+        prev_alt_shortcut = QShortcut(QKeySequence(Qt.Key.Key_A), self)
+        prev_alt_shortcut.activated.connect(self.show_previous_image)
+        prev_alt_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
 
         next_icon_path = os.path.join(icon_dir, "arrow-right.svg")
         self.next_action = QAction(QIcon(next_icon_path), "次へ", self)
         self.next_action.triggered.connect(self.show_next_image)
-        self.next_action.setShortcut(Qt.Key.Key_Right)
-        self.next_action.setShortcut(Qt.Key.Key_D)
+        self.next_action.setShortcut(QKeySequence(Qt.Key.Key_Right)) # 変更：明示的にQKeySequenceを使用
+        self.next_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # 変更：アプリケーション全体に適用
         self.next_action.setToolTip("次の画像を表示します (→ or D)")
-        self.next_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut) # <<<--- コンテキスト設定
         self.toolbar.addAction(self.next_action)
+        
+        # D キーにも対応（代替ショートカット）
+        next_alt_shortcut = QShortcut(QKeySequence(Qt.Key.Key_D), self)
+        next_alt_shortcut.activated.connect(self.show_next_image)
+        next_alt_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
 
         self.toolbar.addSeparator()
 
@@ -132,7 +141,8 @@ class SingleImageView(QWidget):
         self.slideshow_action = QAction(QIcon(slideshow_play_icon_path), "スライドショー開始", self)
         self.slideshow_action.setCheckable(True)
         self.slideshow_action.toggled.connect(self.toggle_slideshow)
-        self.slideshow_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut) # <<<--- コンテキスト設定
+        self.slideshow_action.setShortcut(QKeySequence(Qt.Key.Key_Space)) # 追加：スペースキーショートカット
+        self.slideshow_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # 変更：アプリケーション全体に適用
         self.toolbar.addAction(self.slideshow_action)
 
         # モード切り替えアクション
@@ -160,7 +170,7 @@ class SingleImageView(QWidget):
         zoom_in_action = QAction(QIcon(zoom_in_icon_path), "拡大", self)
         zoom_in_action.triggered.connect(self.zoom_in)
         zoom_in_action.setShortcut(QKeySequence.ZoomIn)
-        zoom_in_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut) # <<<--- コンテキスト設定
+        zoom_in_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # 変更：アプリケーション全体に適用
         zoom_in_action.setToolTip("画像を拡大します (Ctrl + +)")
         self.toolbar.addAction(zoom_in_action)
 
@@ -168,23 +178,23 @@ class SingleImageView(QWidget):
         zoom_out_action = QAction(QIcon(zoom_out_icon_path), "縮小", self)
         zoom_out_action.triggered.connect(self.zoom_out)
         zoom_out_action.setShortcut(QKeySequence.ZoomOut)
-        zoom_out_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut) # <<<--- コンテキスト設定
+        zoom_out_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # 変更：アプリケーション全体に適用
         zoom_out_action.setToolTip("画像を縮小します (Ctrl + -)")
         self.toolbar.addAction(zoom_out_action)
 
         zoom_fit_icon_path = os.path.join(icon_dir, "broken-image.svg") # アイコンファイル名 (変更推奨)
         zoom_fit_action = QAction(QIcon(zoom_fit_icon_path), "全体表示", self)
         zoom_fit_action.triggered.connect(self.fit_to_view)
-        zoom_fit_action.setShortcut(Qt.Key.Key_F)
-        zoom_fit_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        zoom_fit_action.setShortcut(QKeySequence(Qt.Key.Key_F)) # 明示的にQKeySequenceを使用
+        zoom_fit_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # 変更：アプリケーション全体に適用
         zoom_fit_action.setToolTip("画像を全体表示します (F)")
         self.toolbar.addAction(zoom_fit_action)
 
         zoom_original_icon_path = os.path.join(icon_dir, "desktop-wallpaper.svg") # アイコンファイル名 (変更推奨)
         zoom_original_action = QAction(QIcon(zoom_original_icon_path), "等倍表示", self)
         zoom_original_action.triggered.connect(self.zoom_original)
-        zoom_original_action.setShortcut(Qt.Key.Key_0)
-        zoom_original_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        zoom_original_action.setShortcut(QKeySequence(Qt.Key.Key_0)) # 明示的にQKeySequenceを使用
+        zoom_original_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # 変更：アプリケーション全体に適用
         zoom_original_action.setToolTip("画像を等倍表示します (0)")
         self.toolbar.addAction(zoom_original_action)
 
@@ -194,16 +204,16 @@ class SingleImageView(QWidget):
         rotate_left_icon_path = os.path.join(icon_dir, "rotate-left.svg") # アイコンファイル名
         rotate_left_action = QAction(QIcon(rotate_left_icon_path), "左回転", self)
         rotate_left_action.triggered.connect(self.rotate_left)
-        rotate_left_action.setShortcut(Qt.Key.Key_L)
-        rotate_left_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut) # <<<--- コンテキスト設定
+        rotate_left_action.setShortcut(QKeySequence(Qt.Key.Key_L)) # 明示的にQKeySequenceを使用
+        rotate_left_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # 変更：アプリケーション全体に適用
         rotate_left_action.setToolTip("画像を左に90度回転します (L)")
         self.toolbar.addAction(rotate_left_action)
 
         rotate_right_icon_path = os.path.join(icon_dir, "rotate-right.svg") # アイコンファイル名
         rotate_right_action = QAction(QIcon(rotate_right_icon_path), "右回転", self)
         rotate_right_action.triggered.connect(self.rotate_right)
-        rotate_right_action.setShortcut(Qt.Key.Key_R)
-        rotate_right_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut) # <<<--- コンテキスト設定
+        rotate_right_action.setShortcut(QKeySequence(Qt.Key.Key_R)) # 明示的にQKeySequenceを使用
+        rotate_right_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # 変更：アプリケーション全体に適用
         rotate_right_action.setToolTip("画像を右に90度回転します (R)")
         self.toolbar.addAction(rotate_right_action)
 
@@ -215,7 +225,8 @@ class SingleImageView(QWidget):
         self.fullscreen_action.setCheckable(True)
         # MainWindow 側で状態を管理するため、ここではシグナルを発行するだけ
         self.fullscreen_action.toggled.connect(self.fullscreen_toggled.emit)
-        self.fullscreen_action.setShortcut(Qt.Key.Key_F11)
+        self.fullscreen_action.setShortcut(QKeySequence(Qt.Key.Key_F11)) # 明示的にQKeySequenceを使用
+        self.fullscreen_action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut) # アプリケーション全体に適用
         self.toolbar.addAction(self.fullscreen_action)
 
     # --- 追加: UI要素の表示/非表示を切り替えるメソッド ---
