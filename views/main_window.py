@@ -1,291 +1,413 @@
-"""
-メインウィンドウモジュール - 改良版
-
-アプリケーションのメインウィンドウを提供します。
-レスポンシブUIデザインを適用しています。
-"""
+# --- START OF MODIFIED views/main_window.py ---
 import os
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QStatusBar,
-    QToolBar, QStyle, QTabWidget, QVBoxLayout, QWidget
+    QToolBar, QStyle, QTabWidget, QVBoxLayout, QWidget,
+    QStackedWidget
 )
-from PySide6.QtGui import QAction, QKeySequence, QIcon
-from PySide6.QtCore import Qt, Slot
-
+from PySide6.QtGui import QAction, QKeySequence, QIcon, QKeyEvent # QKeyEvent をインポート
+from PySide6.QtCore import Qt, Slot, QEvent, QTimer,QObject # QTimerも追加しておくと後で役立つかも
 from models.image_model import ImageModel
-from models.enhanced_thumbnail_cache import EnhancedThumbnailCache
+from models.unified_thumbnail_cache import UnifiedThumbnailCache
 from controllers.worker_manager import WorkerManager
 from controllers.enhanced_image_loader import EnhancedImageLoader
 from views.enhanced_grid_view import EnhancedGridView
 from views.flow_grid_view import FlowGridView
-from controllers.directory_scanner import DirectoryScannerWorker
+from views.single_image_view import SingleImageView # 正しいビュークラスをインポート
+from utils import logger, get_config
 
 class MainWindow(QMainWindow):
-    """
-    アプリケーションのメインウィンドウ
-    
-    メニュー、ツールバー、ステータスバー、およびタブ形式の中央ウィジェットを管理します。
-    レスポンシブなグリッドビューとフローレイアウトを使用したビューを提供します。
-    """
-    
     def __init__(self):
-        """初期化"""
         super().__init__()
-        
-        # ウィンドウの設定
-        self.setWindowTitle("画像ビューワー")
-        self.resize(800, 600)
-        
-        # モデルとコントローラーの初期化
+        self.config = get_config()
+
+        logger.info("Main window initialized.")
         self.image_model = ImageModel()
-        # 拡張されたサムネイルキャッシュを使用
-        self.thumbnail_cache = EnhancedThumbnailCache(
-            memory_limit=500,  # 最大500枚のサムネイルをメモリに保持
-            disk_cache_limit_mb=2000,  # ディスクキャッシュは2GBまで
-            cleanup_interval=120000  # 2分ごとにクリーンアップをチェック
+        self.thumbnail_cache = UnifiedThumbnailCache(
+            memory_limit=self.config.get("cache.memory_limit"),
+            disk_cache_dir=self.config.get("cache.disk_cache_dir"),
+            disk_cache_limit_mb=self.config.get("cache.disk_cache_limit_mb"),
+            cleanup_interval=self.config.get("cache.cleanup_interval_ms")
         )
         self.worker_manager = WorkerManager()
         self.image_loader = EnhancedImageLoader(self.image_model, self.thumbnail_cache, self.worker_manager)
-        
-        # UIコンポーネントの初期化
+
         self.setup_ui()
         self.setup_connections()
-    
+
+        # --- イベントフィルターのインストール ---
+        if hasattr(self, 'single_view_widget'):
+            self.single_view_widget.installEventFilter(self)
+            logger.debug("Event filter installed on single_view_widget.")
+
     def setup_ui(self):
-        """UIコンポーネントを設定"""
-    # ステータスバーの設定
-        self.statusBar().showMessage("準備完了")
-    
-    # タブウィジェットの作成
+        logger.debug("Setting up UI components.")
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("準備完了")
+
+        self.stacked_widget = QStackedWidget()
+        self.setCentralWidget(self.stacked_widget)
+
         self.tab_widget = QTabWidget()
-        self.setCentralWidget(self.tab_widget)
-    
-    # 拡張グリッドビューの作成
-        self.grid_view = EnhancedGridView(
-            self.image_model,
-            self.worker_manager
-    )
-        self.tab_widget.addTab(self.grid_view, "グリッドビュー")
-    
-    # フローグリッドビューの作成
-        self.flow_view = FlowGridView(
-        self.image_model,
-        self.worker_manager
-    )
-        self.tab_widget.addTab(self.flow_view, "フロービュー")
-    
-    # メニューバーとツールバーの設定（タブ作成後に移動）
+        try:
+             self.grid_view = EnhancedGridView(self.image_model, self.worker_manager)
+             self.tab_widget.addTab(self.grid_view, "グリッドビュー")
+             self.flow_view = FlowGridView(self.image_model, self.worker_manager)
+             self.tab_widget.addTab(self.flow_view, "フロービュー")
+        except Exception as e:
+             logger.exception("Error creating view tabs.", exc_info=True)
+             QMessageBox.critical(self, "UIエラー", f"ビューの作成中にエラーが発生しました:\n{e}")
+
+        default_view_index = 0 if self.config.get("display.default_view", "grid") == "grid" else 1
+        self.tab_widget.setCurrentIndex(default_view_index)
+
+        # SingleImageView をインスタンス化
+        self.single_view_widget = SingleImageView(self.image_model, self)
+
+        self.stacked_widget.addWidget(self.tab_widget)       # Index 0
+        self.stacked_widget.addWidget(self.single_view_widget) # Index 1
+        self.stacked_widget.setCurrentIndex(0)
+
         self.create_menus()
         self.create_toolbars()
-    
+
     def create_menus(self):
-        """メニューを作成"""
-        # ファイルメニュー
-        file_menu = self.menuBar().addMenu("ファイル")
-        
-        # フォルダを開くアクション
-        open_action = QAction("フォルダを開く...", self)
+        # ... (変更なし) ...
+        logger.debug("Creating menus.")
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("ファイル(&F)")
+        open_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon), "フォルダを開く(&O)...", self)
         open_action.setShortcut(QKeySequence.Open)
+        open_action.setStatusTip("画像が含まれるフォルダを開きます")
         open_action.triggered.connect(self.open_folder)
         file_menu.addAction(open_action)
-        
-        # キャッシュメニュー
-        cache_menu = file_menu.addMenu("キャッシュ")
-        
-        # キャッシュをクリアアクション
+        file_menu.addSeparator()
+        cache_menu = file_menu.addMenu("キャッシュ(&C)")
         clear_cache_action = QAction("キャッシュをクリア", self)
+        clear_cache_action.setStatusTip("サムネイルキャッシュを削除します")
         clear_cache_action.triggered.connect(self.clear_cache)
         cache_menu.addAction(clear_cache_action)
-        
-        # キャッシュ情報を表示アクション
         show_cache_info_action = QAction("キャッシュ情報を表示", self)
+        show_cache_info_action.setStatusTip("キャッシュの使用状況を表示します")
         show_cache_info_action.triggered.connect(self.show_cache_info)
         cache_menu.addAction(show_cache_info_action)
-        
         file_menu.addSeparator()
-        
-        # 終了アクション
-        exit_action = QAction("終了", self)
+        exit_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton), "終了(&X)", self)
         exit_action.setShortcut(QKeySequence.Quit)
+        exit_action.setStatusTip("アプリケーションを終了します")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        
-        # 表示メニュー
-        view_menu = self.menuBar().addMenu("表示")
-        
-        # 表示のリフレッシュアクション
-        refresh_action = QAction("表示を更新", self)
+        view_menu = menu_bar.addMenu("表示(&V)")
+        refresh_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload), "表示を更新(&R)", self)
         refresh_action.setShortcut(QKeySequence("F5"))
+        refresh_action.setStatusTip("現在の表示を更新します")
         refresh_action.triggered.connect(self.refresh_view)
         view_menu.addAction(refresh_action)
-        
-        # ビュータイプのサブメニュー
-        view_type_menu = view_menu.addMenu("ビュータイプ")
-        
-        # グリッドビューアクション
-        grid_view_action = QAction("グリッドビュー", self)
-        grid_view_action.setCheckable(True)
-        grid_view_action.setChecked(True)
-        grid_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(0))
-        view_type_menu.addAction(grid_view_action)
-        
-        # フロービューアクション
-        flow_view_action = QAction("フロービュー", self)
-        flow_view_action.setCheckable(True)
-        flow_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
-        view_type_menu.addAction(flow_view_action)
-        
-        # タブが変更されたときにアクションを同期
-        self.tab_widget.currentChanged.connect(lambda idx: self.sync_view_actions(grid_view_action, flow_view_action, idx))
-    
+        view_menu.addSeparator()
+        view_type_menu = view_menu.addMenu("ビュータイプ(&T)")
+        self.grid_view_action = QAction("グリッドビュー", self)
+        self.grid_view_action.setCheckable(True)
+        self.grid_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(0))
+        view_type_menu.addAction(self.grid_view_action)
+        self.flow_view_action = QAction("フロービュー", self)
+        self.flow_view_action.setCheckable(True)
+        self.flow_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
+        view_type_menu.addAction(self.flow_view_action)
+        self.sync_view_actions(self.tab_widget.currentIndex())
+        self.tab_widget.currentChanged.connect(self.sync_view_actions)
+
+
     def create_toolbars(self):
         """ツールバーを作成"""
-        # メインツールバー
-        main_toolbar = QToolBar("メインツールバー", self)
-        self.addToolBar(main_toolbar)
-        
-        # フォルダを開くアクション
-        open_action = QAction("フォルダを開く", self)
+        logger.debug("Creating toolbars.")
+        # メインツールバーのインスタンスを self に保持する
+        self.main_toolbar = QToolBar("メインツールバー")
+        self.main_toolbar.setMovable(False)
+        self.addToolBar(self.main_toolbar)
+
+        # --- ツールバーへのアクション追加 ---
+        # (変更なし)
+        open_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon), "フォルダを開く", self)
+        open_action.setStatusTip("画像が含まれるフォルダを開きます")
         open_action.triggered.connect(self.open_folder)
-        # 標準アイコンを使用
-        open_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
-        main_toolbar.addAction(open_action)
-        
-        # ビュー切り替えアクション
-        main_toolbar.addSeparator()
-        
-        # グリッドビューアクション
-        grid_view_action = QAction("グリッドビュー", self)
-        grid_view_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogListView))
-        grid_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(0))
-        main_toolbar.addAction(grid_view_action)
-        
-        # フロービューアクション
-        flow_view_action = QAction("フロービュー", self)
-        flow_view_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
-        flow_view_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
-        main_toolbar.addAction(flow_view_action)
-    
+        self.main_toolbar.addAction(open_action)
+
+        self.main_toolbar.addSeparator()
+
+        grid_view_tool_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogListView), "グリッドビュー", self)
+        grid_view_tool_action.setStatusTip("グリッド形式で表示します")
+        grid_view_tool_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(0))
+        self.main_toolbar.addAction(grid_view_tool_action)
+
+        flow_view_tool_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), "フロービュー", self)
+        flow_view_tool_action.setStatusTip("フローレイアウトで表示します")
+        flow_view_tool_action.triggered.connect(lambda: self.tab_widget.setCurrentIndex(1))
+        self.main_toolbar.addAction(flow_view_tool_action)
+
+        self.main_toolbar.addSeparator()
+        refresh_tool_action = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload), "更新", self)
+        refresh_tool_action.setStatusTip("現在の表示を更新します (F5)")
+        refresh_tool_action.triggered.connect(self.refresh_view)
+        self.main_toolbar.addAction(refresh_tool_action)
+
+
     def setup_connections(self):
-        """シグナル/スロット接続を設定"""
-        # イメージローダーの接続
-        self.image_loader.loading_finished.connect(self.loading_finished)
-        self.image_loader.thumbnail_created.connect(self.update_thumbnail)
-        self.image_loader.error_occurred.connect(self.show_error)
-        self.image_loader.progress_updated.connect(self.update_progress) # 進捗シグナルを接続
+        logger.debug("Setting up signal/slot connections.")
+        try:
+            self.image_loader.loading_finished.connect(self.on_loading_finished)
+            self.image_loader.thumbnail_created.connect(self.update_thumbnail)
+            self.image_loader.error_occurred.connect(self.show_error)
+            self.image_loader.progress_updated.connect(self.update_progress)
 
-        # イメージグリッドビューの接続
-        self.grid_view.image_selected.connect(self.show_image_details)
-        self.grid_view.thumbnail_needed.connect(self.image_loader.request_thumbnail)
-        
-        # フロービューの接続
-        self.flow_view.image_selected.connect(self.show_image_details)
-        self.flow_view.thumbnail_needed.connect(self.image_loader.request_thumbnail)
+            if hasattr(self, 'grid_view'):
+                 self.grid_view.image_selected.connect(self.show_single_image_view)
+                 self.grid_view.thumbnail_needed.connect(self.image_loader.request_thumbnail)
+            if hasattr(self, 'flow_view'):
+                 self.flow_view.image_selected.connect(self.show_single_image_view)
+                 self.flow_view.thumbnail_needed.connect(self.image_loader.request_thumbnail)
 
-    def sync_view_actions(self, grid_action, flow_action, index):
-        """ビューアクションの選択状態をタブと同期"""
-        if index == 0:
-            grid_action.setChecked(True)
-            flow_action.setChecked(False)
-        else:
-            grid_action.setChecked(False)
-            flow_action.setChecked(True)
+            # single_view_widget のシグナルを接続
+            self.single_view_widget.back_requested.connect(self.show_thumbnail_view)
+            self.single_view_widget.fullscreen_toggled.connect(self.handle_fullscreen_toggle) # フルスクリーン接続
+
+        except Exception as e:
+             logger.exception("Error setting up connections.", exc_info=True)
+             QMessageBox.critical(self, "接続エラー", f"シグナル/スロット接続中にエラーが発生しました:\n{e}")
+
+    @Slot(int)
+    def sync_view_actions(self, index):
+        # ... (変更なし) ...
+        is_grid_active = (index == 0)
+        self.grid_view_action.setChecked(is_grid_active)
+        self.flow_view_action.setChecked(not is_grid_active)
+        logger.debug(f"Synced view actions. Current index: {index} (Grid: {is_grid_active})")
 
     @Slot()
     def open_folder(self):
-        """フォルダを開く"""
-        folder_path = QFileDialog.getExistingDirectory(self, "フォルダを選択")
+        # ... (変更なし) ...
+        folder_path = QFileDialog.getExistingDirectory(self, "フォルダを選択", os.path.expanduser("~"))
         if folder_path:
-            self.statusBar().showMessage(f"フォルダスキャン開始: {os.path.basename(folder_path)}...")
-            # 以前のワーカーが動いていたらキャンセルする
-            self.worker_manager.cancel_worker("folder_scan")
+            logger.info(f"Folder selected: {folder_path}")
+            self.status_bar.showMessage(f"フォルダスキャン開始: {os.path.basename(folder_path)}...")
+            if self.worker_manager.is_worker_active("folder_scan"):
+                 logger.info("Cancelling previous folder scan worker.")
+                 self.worker_manager.cancel_worker("folder_scan")
             self.image_loader.load_images_from_folder(folder_path)
+        else:
+            logger.info("Folder selection cancelled.")
 
     @Slot(int)
     def update_progress(self, value):
-        """
-        進捗を更新 (フォルダスキャン中)
-
-        Args:
-            value (int): 進捗値 (0-100)
-        """
-        self.statusBar().showMessage(f"フォルダスキャン中... {value}%")
+        # ... (変更なし) ...
+        self.status_bar.showMessage(f"フォルダスキャン中... {value}%")
 
     @Slot()
-    def loading_finished(self):
-        """フォルダスキャンとモデル更新完了時の処理"""
+    def on_loading_finished(self):
+        # ... (変更なし) ...
         count = self.image_model.image_count()
-        self.statusBar().showMessage(f"{count}枚の画像を検出しました。サムネイル表示中...")
+        logger.info(f"Loading finished. {count} images found.")
+        self.status_bar.showMessage(f"{count}枚の画像を検出しました。サムネイル準備中...", 5000)
 
     @Slot(str, object)
     def update_thumbnail(self, image_path, thumbnail):
-        """
-        サムネイルを更新
-
-        Args:
-            image_path (str): 画像のパス
-            thumbnail: サムネイル画像 (QPixmap)
-        """
-        # 現在のタブに応じて、対応するビューにサムネイルを送信
-        self.grid_view.update_thumbnail(image_path, thumbnail)
-        self.flow_view.update_thumbnail(image_path, thumbnail)
+        # ... (変更なし) ...
+        try:
+             if hasattr(self, 'grid_view'):
+                  self.grid_view.receive_thumbnail(image_path, thumbnail)
+             if hasattr(self, 'flow_view'):
+                  self.flow_view.receive_thumbnail(image_path, thumbnail)
+        except Exception as e:
+             logger.error(f"Error updating thumbnail in view for {image_path}: {e}")
 
     @Slot(str)
     def show_error(self, message):
-        """
-        エラーメッセージを表示
+        # ... (変更なし) ...
+        logger.error(f"Error occurred: {message}")
+        self.status_bar.showMessage(f"エラー: {message}", 10000)
 
-        Args:
-            message (str): エラーメッセージ
-        """
-        self.statusBar().showMessage("エラーが発生しました") # ステータスバーも更新
-        QMessageBox.critical(self, "エラー", message)
-    
     @Slot(str)
-    def show_image_details(self, image_path):
-        """
-        画像の詳細を表示
+    def show_single_image_view(self, image_path: str):
+        logger.info(f"Switching to single image view for: {image_path}")
+        try:
+            current_index = self.image_model.images.index(image_path)
+        except ValueError:
+            logger.error(f"選択された画像がモデル内に見つかりません: {image_path}")
+            QMessageBox.warning(self, "エラー", "選択された画像がリスト内に見つかりません。")
+            return
+        if self.image_model.image_count() == 0: return
+
+        self.single_view_widget.load_image(current_index)
+        self.stacked_widget.setCurrentIndex(1)
+        # TODO: ツールバー/メニューの状態を更新
+
+    @Slot()
+    def show_thumbnail_view(self):
+        logger.info("Switching back to thumbnail view.")
+        self.stacked_widget.setCurrentIndex(0)
+        # TODO: ツールバー/メニューの状態を更新
+
+    @Slot(bool)
+    def handle_fullscreen_toggle(self, checked: bool):
+        """フルスクリーンモードを切り替える"""
+        ui_visible = not checked
+
+        # --- UI要素の表示/非表示 ---
+        if hasattr(self, 'main_toolbar'): self.main_toolbar.setVisible(ui_visible)
+        if self.menuBar(): self.menuBar().setVisible(ui_visible)
+        if self.statusBar(): self.statusBar().setVisible(ui_visible)
+        if hasattr(self, 'single_view_widget'): self.single_view_widget.set_ui_elements_visible(ui_visible)
+
+        # --- ウィンドウ状態の切り替えとフォーカス設定 ---
+        if checked:
+            logger.info("Entering fullscreen mode.")
+            self.showFullScreen()
+            # ★★★ フルスクリーン後に single_view_widget.view にフォーカスを設定 ★★★
+            if hasattr(self, 'single_view_widget'):
+                if hasattr(self.single_view_widget, 'view') and self.single_view_widget.view:
+                    self.single_view_widget.view.setFocus(Qt.FocusReason.OtherFocusReason) # 理由を指定
+                    logger.debug("Set focus to single_view_widget.view")
+                else:
+                    # Fallback to the widget itself if view isn't available or accessible
+                    self.single_view_widget.setFocus(Qt.FocusReason.OtherFocusReason)
+                    logger.debug("Set focus to single_view_widget (fallback)")
+        else:
+            logger.info("Exiting fullscreen mode.")
+            self.showNormal()
+            # ★★★ 通常モードに戻った際にフォーカスを戻す (例: タブウィジェット) ★★★
+            if hasattr(self, 'tab_widget'):
+                 current_tab = self.tab_widget.currentWidget()
+                 if current_tab:
+                     current_tab.setFocus(Qt.FocusReason.OtherFocusReason)
+                     logger.debug("Set focus back to current tab widget")
+
+
+        # --- アクション状態同期 ---
+        if hasattr(self, 'single_view_widget') and hasattr(self.single_view_widget, 'fullscreen_action'):
+             fullscreen_action = self.single_view_widget.fullscreen_action
+             if fullscreen_action and fullscreen_action.isCheckable():
+                  if fullscreen_action.isChecked() != checked:
+                       fullscreen_action.blockSignals(True)
+                       fullscreen_action.setChecked(checked)
+                       fullscreen_action.blockSignals(False)
+
+    # --- イベントフィルター (変更なし) ---
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        # --- キープレスイベントの詳細ログ ---
+        if event.type() == QEvent.Type.KeyPress:
+            if isinstance(event, QKeyEvent):
+                key = event.key()
+                modifiers = event.modifiers()
+                text = event.text()
+                is_autorepeat = event.isAutoRepeat()
+                logger.debug(
+                    f"EventFilter KeyPress on '{watched.objectName() if watched else 'None'}': "
+                    f"Key={key}, Mod={modifiers}, Text='{text}', Repeat={is_autorepeat}, Accepted={event.isAccepted()}"
+                )
+
+        # --- 既存のEscキー処理 ---
+        if watched == self.single_view_widget:
+            if event.type() == QEvent.Type.KeyPress:
+                if isinstance(event, QKeyEvent):
+                    if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
+                        logger.debug("Event filter caught Esc in fullscreen single view.")
+                        self.handle_fullscreen_toggle(False)
+                        fullscreen_action = next((a for a in self.single_view_widget.toolbar.actions() if "フルスクリーン" in a.text()), None)
+                        if fullscreen_action and fullscreen_action.isCheckable():
+                            fullscreen_action.setChecked(False)
+                        logger.debug("Event filter consumed Esc key.")
+                        return True # イベント消費
+
+        # --- 上記以外はデフォルト処理 ---
+        try:
+            accepted = super().eventFilter(watched, event)
+            # if event.type() == QEvent.Type.KeyPress: # super().eventFilter後の状態もログ
+            #    logger.debug(f"EventFilter returning {accepted} for KeyPress on '{watched.objectName() if watched else 'None'}' after super call.")
+            return accepted
+        except Exception as e:
+             logger.error(f"Error in super().eventFilter: {e}")
+             return False # エラー時はイベントをブロックしない
         
-        Args:
-            image_path (str): 画像のパス
-        """
-        # 現在はパスをステータスバーに表示するだけ
-        self.statusBar().showMessage(f"選択された画像: {image_path}")
-        
-        # 詳細表示機能は拡張タスクで実装予定
-    
+
     @Slot()
     def clear_cache(self):
-        """キャッシュをクリア"""
-        self.thumbnail_cache.clear()
-        QMessageBox.information(self, "情報", "サムネイルキャッシュをクリアしました")
-    
+        # ... (変更なし) ...
+        logger.info("Clearing thumbnail cache.")
+        reply = QMessageBox.question(self, "キャッシュクリアの確認",
+                                     "サムネイルキャッシュをクリアしますか？\n(次回表示時に再生成されます)",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                 success = self.thumbnail_cache.clear()
+                 if success:
+                      QMessageBox.information(self, "キャッシュクリア完了", "サムネイルキャッシュをクリアしました。")
+                      logger.info("Thumbnail cache cleared successfully.")
+                      self.refresh_view()
+                 else:
+                      QMessageBox.warning(self, "キャッシュクリア失敗", "サムネイルキャッシュのクリア中にエラーが発生しました。")
+                      logger.error("Failed to clear thumbnail cache.")
+            except Exception as e:
+                 logger.exception("Exception during cache clear.", exc_info=True)
+                 QMessageBox.critical(self, "キャッシュクリアエラー", f"キャッシュクリア中に予期せぬエラーが発生しました:\n{e}")
+        else:
+             logger.info("Cache clear cancelled by user.")
+
+
     @Slot()
     def show_cache_info(self):
-        """キャッシュ情報を表示"""
-        stats = self.thumbnail_cache.get_stats()
-        
-        # 統計情報を整形
-        info_text = "【サムネイルキャッシュ情報】\n\n"
-        info_text += f"メモリキャッシュ: {stats['memory_cache_count']} / {stats['memory_cache_limit']} アイテム\n"
-        info_text += f"ディスクキャッシュ: {stats['disk_cache_count']} アイテム\n"
-        info_text += f"ディスクキャッシュサイズ: {stats['disk_cache_size_mb']:.2f} MB / {stats['disk_cache_limit_mb']:.2f} MB\n"
-        
-        # 拡張キャッシュの場合は追加情報を表示
-        if 'enhanced' in stats and stats['enhanced']:
-            info_text += f"\nキャッシュヒット: {stats['cache_hits']} 回\n"
-            info_text += f"キャッシュミス: {stats['cache_misses']} 回\n"
-            info_text += f"ヒット率: {stats['hit_ratio']:.2f}%\n"
-            info_text += f"クリーンアップ間隔: {stats['cleanup_interval_ms'] / 1000} 秒\n"
-        
-        QMessageBox.information(self, "キャッシュ情報", info_text)
-    
+        # ... (変更なし) ...
+        logger.debug("Showing cache info.")
+        try:
+            stats = self.thumbnail_cache.get_stats()
+            info_text = "【サムネイルキャッシュ情報】\n\n"
+            mem_limit = stats.get('memory_cache_limit', 'N/A')
+            info_text += f"メモリキャッシュ: {stats.get('memory_cache_count', 'N/A')} / {mem_limit} アイテム\n"
+            disk_limit = stats.get('disk_cache_limit_mb', 0)
+            info_text += f"ディスクキャッシュ: {stats.get('disk_cache_count', 'N/A')} アイテム\n"
+            info_text += f"ディスクキャッシュサイズ: {stats.get('disk_cache_size_mb', 0):.2f} MB / {disk_limit:.2f} MB\n"
+            info_text += f"\nヒット率: {stats.get('hit_ratio', 0):.2f}%\n"
+            info_text += f"総ヒット数: {stats.get('hits', 'N/A')}\n"
+            info_text += f"総ミス数: {stats.get('misses', 'N/A')}\n"
+            info_text += f"総書き込み数: {stats.get('writes', 'N/A')}\n"
+            info_text += f"総エラー数: {stats.get('errors', 'N/A')}\n"
+            if stats.get('enhanced', False) or stats.get('using_sqlite', False):
+                 info_text += f"\nクリーンアップ回数: {stats.get('cleanup_count', 'N/A')}\n"
+                 cleanup_interval_s = stats.get('cleanup_interval_ms', 0) / 1000
+                 info_text += f"クリーンアップ間隔: {cleanup_interval_s} 秒\n"
+                 popular = stats.get('popular_entries', [])
+                 if popular:
+                      info_text += "\nアクセス数の多いエントリ Top 5:\n"
+                      for entry in popular:
+                           info_text += f" - {entry.get('path', '?')} ({entry.get('size', '?')}): {entry.get('count', '?')}回\n"
+            QMessageBox.information(self, "キャッシュ情報", info_text)
+        except Exception as e:
+             logger.exception("Error getting cache stats.", exc_info=True)
+             QMessageBox.critical(self, "情報取得エラー", f"キャッシュ情報の取得中にエラーが発生しました:\n{e}")
+
     @Slot()
     def refresh_view(self):
-        """表示を更新"""
-        # 現在のタブに応じて、対応するビューをリフレッシュ
-        current_index = self.tab_widget.currentIndex()
-        if current_index == 0:
-            self.grid_view.refresh()
+        # ... (変更なし) ...
+        current_tab_index = self.tab_widget.currentIndex()
+        logger.info(f"Refreshing current view (Tab index: {current_tab_index}).")
+        current_widget = self.tab_widget.currentWidget()
+        if isinstance(current_widget, (EnhancedGridView, FlowGridView)):
+            current_widget.refresh()
         else:
-            self.flow_view.refresh()
+            logger.warning("Current tab widget is not a known view type, cannot refresh.")
+
+    def closeEvent(self, event):
+        # ... (変更なし) ...
+        logger.info("Close event received. Shutting down workers and saving state...")
+        cancelled_count = self.worker_manager.cancel_all()
+        logger.info(f"Attempted to cancel {cancelled_count} workers.")
+        if hasattr(self.thumbnail_cache, '_update_db_stats'):
+             self.thumbnail_cache._update_db_stats()
+        logger.info("Cleanup complete. Accepting close event.")
+        event.accept()
+
+    # --- keyPressEvent を削除 ---
+    # def keyPressEvent(self, event: QKeyEvent):
+    #     # ... (このメソッド全体を削除またはコメントアウト) ...
+
+# --- END OF MODIFIED views/main_window.py ---

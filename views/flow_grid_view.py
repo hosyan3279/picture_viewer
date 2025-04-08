@@ -1,29 +1,28 @@
+# --- START REFACTORED views/flow_grid_view.py ---
 """
 フローグリッドビューモジュール
 
 FlowLayoutを使用した画像ギャラリービューを提供します。
 ウィンドウサイズに応じて自然に「流れる」ように画像を配置します。
 """
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
-    QLabel, QPushButton, QComboBox, QSlider, QSizePolicy, QFrame
-)
-from PySide6.QtCore import Qt, Signal, QTimer, QSize, QRect, QPoint, QMargins
-from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QWidget # Keep QWidget for content_widget
+# Import Slot from PySide6.QtCore
+from PySide6.QtCore import Qt, QTimer, QSize, QRect, QPoint, Slot
+from PySide6.QtGui import QPixmap, QResizeEvent
 
+# Import necessary components
+from .base_image_grid_view import BaseImageGridView
 from .lazy_image_label import LazyImageLabel
-from .flow_layout import FlowLayout
+from .flow_layout import FlowLayout # Keep FlowLayout
+from utils import logger # Import logger
 
-class FlowGridView(QWidget):
+class FlowGridView(BaseImageGridView):
     """
     FlowLayoutを使用した画像ギャラリービュー
-    
+
     ウィンドウサイズに応じて自然に「流れる」ように画像を配置します。
     遅延読み込みやページネーションなどの機能も備えています。
     """
-    # シグナル定義
-    image_selected = Signal(str)  # 選択された画像のパス
-    thumbnail_needed = Signal(str, QSize)  # サムネイルが必要なとき (image_path, size)
 
     def __init__(self, image_model, worker_manager, parent=None):
         """
@@ -34,391 +33,203 @@ class FlowGridView(QWidget):
             worker_manager: ワーカーマネージャー
             parent: 親ウィジェット
         """
-        super().__init__(parent)
-        self.image_model = image_model
-        self.worker_manager = worker_manager
+        # Initialize Base Class (handles common UI, timers, size/page logic)
+        super().__init__(image_model, worker_manager, parent)
 
-        # 設定
-        self.page_size = 100  # 一度に表示する画像の数
-        self.current_page = 0
-        self.total_pages = 0
-        
-        # サムネイルサイズの設定
-        self.base_thumbnail_sizes = {
-            0: QSize(100, 100),  # 小
-            1: QSize(150, 150),  # 中
-            2: QSize(200, 200)   # 大
-        }
-        self.min_thumbnail_size = 80
-        self.max_thumbnail_size = 300
-        self.thumbnail_size = self.base_thumbnail_sizes[1]  # デフォルトは「中」
-        
-        self.image_labels = {}  # 画像パス → ラベルウィジェットのマッピング
-        self.load_batch_size = 10  # 一度に読み込む画像の数
+        # --- Flow Specific Settings ---
+        self.load_batch_size = self.config.get("workers.load_batch_size", 10) # Flow might load more
 
-        # リサイズデバウンス用タイマー
-        self.resize_timer = QTimer(self)
-        self.resize_timer.setSingleShot(True)
-        self.resize_timer.setInterval(200)  # 200ms
-        self.resize_timer.timeout.connect(self.on_resize_timeout)
-        
-        self.pending_resize = False
+        # --- Flow Layout ---
+        self.flow_layout = FlowLayout(self.content_widget) # Use the content_widget from base class
+        spacing = self.config.get("display.ui.flow_spacing", 10)
+        margins = self.config.get("display.ui.flow_margins", 10)
+        self.flow_layout.setSpacing(spacing)
+        self.flow_layout.setContentsMargins(margins, margins, margins, margins)
 
-        # UIコンポーネント
-        self.setup_ui()
+        # --- Visibility Check Timer ---
+        # Flow layout might benefit from slightly different timing
+        self.visibility_check_timer = QTimer(self)
+        vis_check_interval = self.config.get("display.ui.visibility_check_interval_ms", 150)
+        self.visibility_check_timer.setInterval(vis_check_interval)
+        self.visibility_check_timer.timeout.connect(self.load_visible_images) # Connect to the correct method
+        self.visibility_check_timer.start()
 
-        # モデルの変更を監視
-        self.image_model.data_changed.connect(self.refresh)
+        # Override page size calculation based on density/zoom if needed
+        self._update_flow_page_size() # Initial calculation
 
-        # 可視ラベルの読み込みを定期的にチェック
-        self.load_timer = QTimer(self)
-        self.load_timer.setInterval(150)  # 150ms間隔
-        self.load_timer.timeout.connect(self.load_visible_thumbnails)
-        self.load_timer.start()
+        logger.debug("FlowGridView initialized.")
 
-        # スクロールイベントにも接続
-        self.scroll_area.verticalScrollBar().valueChanged.connect(self.on_scroll_changed)
-        self.scroll_debounce_timer = QTimer(self)
-        self.scroll_debounce_timer.setSingleShot(True)
-        self.scroll_debounce_timer.setInterval(100)
-        self.scroll_debounce_timer.timeout.connect(self.load_visible_thumbnails)
+    # Override density change to recalculate page size for flow
+    @Slot(int) # Add Slot decorator
+    def on_density_changed(self, index: int):
+        super().on_density_changed(index) # Call base class logic first
+        self._update_flow_page_size() # Recalculate page size for flow layout
+        self.refresh() # Refresh is needed because page size changed
 
-    def refresh(self):
-        """表示を更新"""
-        # ページ数を更新
-        total_images = self.image_model.image_count()
-        self.total_pages = max(1, (total_images + self.page_size - 1) // self.page_size)
+    # Override zoom change to recalculate page size for flow
+    @Slot() # Add Slot decorator
+    def on_zoom_slider_released(self):
+        old_page_size = self.page_size
+        super().on_zoom_slider_released() # Call base class logic first (updates thumbnail size)
+        self._update_flow_page_size() # Recalculate page size based on new thumbnail size
+        if old_page_size != self.page_size:
+             self.refresh() # Refresh if page size changed
 
-        # カレントページをリセット（必要に応じて）
-        if self.current_page >= self.total_pages:
-            self.current_page = max(0, self.total_pages - 1)
+    def _update_flow_page_size(self):
+        """Calculate page size based on current thumbnail size for flow layout."""
+        # Example logic: Larger thumbnails -> smaller page size
+        base_thumb_width = 150 # Reference size
+        base_page_size = 80    # Reference page size
+        current_thumb_width = self.thumbnail_size.width()
 
-        # 現在のページを表示
-        self.display_current_page()
+        if current_thumb_width <= 0: current_thumb_width = base_thumb_width # Avoid division by zero
 
-        # ページコントロールを更新
-        self.update_page_controls()
-        
-    def display_current_page(self):
-        """現在のページを表示"""
-        print(f"DEBUG: display_current_page start, current_page={self.current_page}", flush=True)
-        # 既存のアイテムをクリア
-        self.clear_grid()
+        scale_factor = base_thumb_width / current_thumb_width
+        new_page_size = max(20, int(base_page_size * scale_factor)) # Ensure a minimum page size
+        if self.page_size != new_page_size:
+            self.page_size = new_page_size
+            logger.debug(f"Updated flow page size based on zoom/density: {self.page_size}")
 
-        # 画像がない場合は何もしない
-        if self.image_model.image_count() == 0:
-            self.update_page_controls() # ページラベルを更新
-            return
 
-        # 現在のページの画像を取得
-        start_idx = self.current_page * self.page_size
-        images = self.image_model.get_images_batch(start_idx, self.page_size)
+    # --- Overridden Abstract Methods ---
 
-        # フローレイアウトに画像を配置
+    def place_images(self, images: list):
+        """画像をフローレイアウトに配置 (Implementation)"""
+        logger.debug(f"Placing {len(images)} images in flow layout.")
+        self.clear_grid_widgets() # Clear widgets first
+
         for image_path in images:
-            # 遅延読み込みラベルを作成
+            # Create lazy loading label with current thumbnail size
             label = LazyImageLabel(image_path, self.thumbnail_size)
+            label.image_clicked.connect(self.on_image_click) # Connect click signal
 
-            # シグナルを接続
-            label.image_clicked.connect(self.on_image_click)
-
-            # フローレイアウトに追加
+            # Add to flow layout
             self.flow_layout.addWidget(label)
 
-            # マッピングを保存
+            # Store mapping
             self.image_labels[image_path] = label
+         # Flow layout updates automatically, but adjustSize might be needed
+        self.content_widget.adjustSize()
 
-        # ウィジェットが配置された後に可視性チェックをトリガー
-        QTimer.singleShot(0, self.load_visible_thumbnails)
-        print(f"DEBUG: display_current_page end, num images={len(images)}", flush=True)
-        
-    def on_image_click(self, image_path):
-        """
-        画像クリック時の処理
 
-        Args:
-            image_path (str): クリックされた画像のパス
-        """
-        self.image_selected.emit(image_path)
+    def load_visible_images(self):
+        """可視状態のサムネイルを読み込む (Implementation)"""
+        if not self.image_labels or not self.isVisible():
+             return
 
-    def on_scroll_changed(self):
-        """スクロール変更時の処理（デバウンス用）"""
-        self.scroll_debounce_timer.start() # タイマーをリスタート
+        try:
+            viewport = self.scroll_area.viewport()
+            if not viewport: return
+            visible_rect_local = viewport.rect()
 
-    def load_visible_thumbnails(self):
-        """可視状態のサムネイルを読み込む"""
-        if not self.image_labels:
-            return
+            # Use a larger buffer for flow layout as items wrap unpredictably
+            buffer_y = viewport.height() # Use full viewport height as buffer
+            extended_visible_rect = visible_rect_local.adjusted(0, -buffer_y, 0, buffer_y)
 
-        # 表示領域を取得 (少し上下に余裕を持たせる)
-        viewport = self.scroll_area.viewport()
-        visible_rect = viewport.rect().adjusted(0, -viewport.height(), 0, viewport.height())
+            labels_to_load = []
+            processed_count = 0
+            max_process = 200 # Limit checks per cycle
 
-        labels_to_load = []
-        for image_path, label in self.image_labels.items():
-            # ラベルが有効か確認
-            if not label or label.parent() is None:
-                print(f"DEBUG: Skipping invalid label for {image_path}")
-                continue
+            for image_path, label in self.image_labels.items():
+                processed_count += 1
+                if processed_count > max_process:
+                     logger.warning("Visibility check limit reached, will continue next cycle.")
+                     break
 
-            # 読み込み状態を確認
-            if label.loading_state == LazyImageLabel.STATE_NOT_LOADED:
-                # ラベルの位置をビューポート座標系に変換
+                if not label or label.parent() is None or label.loading_state != LazyImageLabel.STATE_NOT_LOADED:
+                    continue
+
                 try:
-                    label_rect_in_viewport = QRect(label.mapTo(viewport, QPoint(0, 0)), label.size())
+                     # Map top-left to viewport coordinates
+                     label_top_left_in_viewport = label.mapTo(viewport, QPoint(0, 0))
+                     label_rect_in_viewport = QRect(label_top_left_in_viewport, label.size())
 
-                    # 可視領域内にあるかチェック
-                    if visible_rect.intersects(label_rect_in_viewport):
-                        labels_to_load.append((image_path, label))
-                except RuntimeError as e:
-                    # mapToでエラーが発生することがある（ウィジェット削除中など）
-                    print(f"DEBUG: Error mapping label for {image_path}: {e}")
-                    continue # エラーの場合はスキップ
+                     if extended_visible_rect.intersects(label_rect_in_viewport):
+                         labels_to_load.append((image_path, label))
+                         if len(labels_to_load) >= self.load_batch_size:
+                             break # Stop collecting once batch size is reached
+                except RuntimeError as map_error:
+                     # mapTo can fail if widget is being deleted, log and continue
+                     logger.warning(f"Could not map label for {image_path} to viewport: {map_error}")
+                     continue
 
-        # 読み込むラベルがなければ終了
-        if not labels_to_load:
-            return
 
-        print(f"DEBUG: Found {len(labels_to_load)} labels to load.", flush=True)
+            if labels_to_load:
+                 logger.debug(f"Requesting thumbnails for {len(labels_to_load)} visible labels (flow).")
+                 for path, label_widget in labels_to_load:
+                     if label_widget.loading_state == LazyImageLabel.STATE_NOT_LOADED:
+                         label_widget.setLoadingState(LazyImageLabel.STATE_LOADING)
+                         self.thumbnail_needed.emit(path, self.thumbnail_size)
 
-        # 指定数のラベルだけ読み込む
-        load_count = 0
-        for path, label in labels_to_load:
-            if load_count >= self.load_batch_size:
-                break
+        except Exception as e:
+            logger.error(f"Error during flow load_visible_images: {e}", exc_info=True)
 
-            # 念のため再度状態を確認
-            if label.loading_state == LazyImageLabel.STATE_NOT_LOADED:
-                # 読み込み中状態に設定
-                label.setLoadingState(LazyImageLabel.STATE_LOADING)
-
-                # サムネイル読み込みをリクエスト
-                print(f"DEBUG: Requesting thumbnail for {path}", flush=True)
-                self.thumbnail_needed.emit(path, self.thumbnail_size)
-                load_count += 1
-                
-    def update_thumbnail(self, image_path, thumbnail):
-        """
-        特定の画像のサムネイルを更新
-
-        Args:
-            image_path (str): 画像のパス
-            thumbnail (QPixmap): 新しいサムネイル
-        """
-        if image_path in self.image_labels:
-            label = self.image_labels[image_path]
-            # ラベルが存在し、サムネイルが有効な場合のみ更新
-            if label and not thumbnail.isNull():
-                label.set_thumbnail(thumbnail)
-            elif label and thumbnail.isNull():
-                print(f"DEBUG: Received null thumbnail for: {image_path}", flush=True)
-                label.setLoadingState(LazyImageLabel.STATE_ERROR) # エラー状態にする
 
     def clear_grid(self):
-        """フローレイアウト内のすべてのアイテムをクリア"""
-        # 読み込みタイマーを一時停止
-        self.load_timer.stop()
+        """フローレイアウトをクリア (Implementation)"""
+        logger.debug("Clearing flow grid.")
+        # Stop timers
+        self.visibility_check_timer.stop()
         self.scroll_debounce_timer.stop()
 
+        self.clear_grid_widgets() # Remove widgets
+
+        # Clear internal state
         self.image_labels.clear()
+        self.pending_updates.clear() # Clear pending updates
 
-        # レイアウト内のすべてのウィジェットを削除
-        while self.flow_layout.count():
+        # Restart timers
+        self.visibility_check_timer.start()
+
+
+    def clear_grid_widgets(self):
+         """Helper to remove all widgets from the flow layout."""
+         while self.flow_layout.count():
             item = self.flow_layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-        
-        # 読み込みタイマーを再開
-        self.load_timer.start()
+            if item: # Check if item exists
+                 widget = item.widget()
+                 if widget:
+                     widget.deleteLater()
 
-    def prev_page(self):
-        """前のページに移動"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.display_current_page()
-            self.update_page_controls()
 
-            # スクロール位置をリセット
-            self.scroll_area.verticalScrollBar().setValue(0)
+    def process_updates(self, update_keys: list):
+        """サムネイル更新をバッチ処理 (Implementation for Flow)"""
+        # FlowGridView updates thumbnails directly via receive_thumbnail -> label.set_thumbnail
+        # The batch processing mechanism of the base class isn't strictly needed here.
+        # We override it to simply log, as the base class requires implementation.
+        logger.debug(f"FlowGridView received {len(update_keys)} updates (processed directly).")
+        # If direct update causes issues, implement batching logic here similar to EnhancedGridView
+        # For now, assume direct update in receive_thumbnail is sufficient.
+        pass # Base class clears pending_updates after calling this.
 
-    def next_page(self):
-        """次のページに移動"""
-        if self.current_page < self.total_pages - 1:
-            self.current_page += 1
-            self.display_current_page()
-            self.update_page_controls()
+    # Override receive_thumbnail to update label directly (no batching needed for Flow?)
+    @Slot(str, object)
+    def receive_thumbnail(self, image_path: str, thumbnail):
+         """Receive thumbnail and update label directly."""
+         if image_path in self.image_labels:
+             label = self.image_labels[image_path]
+             if label and label.parent() is not None:
+                 if not thumbnail or (hasattr(thumbnail, 'isNull') and thumbnail.isNull()):
+                      logger.warning(f"Received invalid thumbnail for {image_path} in FlowView.")
+                      label.setLoadingState(LazyImageLabel.STATE_ERROR)
+                 else:
+                      # Update label size if needed
+                      if label.size() != self.thumbnail_size:
+                           label.update_size(self.thumbnail_size)
+                      label.set_thumbnail(thumbnail) # Update label directly
+             else:
+                  logger.debug(f"Label for {image_path} no longer exists in FlowView.")
+         # Do not add to self.pending_updates
 
-            # スクロール位置をリセット
-            self.scroll_area.verticalScrollBar().setValue(0)
-            
-    def update_page_controls(self):
-        """ページコントロールを更新"""
-        if self.image_model.image_count() > 0:
-            self.page_label.setText(f"{self.current_page + 1} / {self.total_pages}")
-            self.prev_button.setEnabled(self.current_page > 0)
-            self.next_button.setEnabled(self.current_page < self.total_pages - 1)
-        else:
-            self.page_label.setText("0 / 0")
-            self.prev_button.setEnabled(False)
-            self.next_button.setEnabled(False)
 
-    def on_density_changed(self, index):
-        """
-        表示密度変更時の処理
+    # --- Overridden Resize Handling ---
+    def handle_resize(self, event: QResizeEvent):
+        """リサイズ適用（デバウンス後） - FlowLayout handles reflow"""
+        super().handle_resize(event)
+        logger.debug("FlowGridView handling resize - triggering visibility check.")
+        # Flow layout reflows automatically, just need to check visibility
+        # Use QTimer to ensure layout changes are processed before checking visibility
+        QTimer.singleShot(0, self.load_visible_images)
 
-        Args:
-            index (int): コンボボックスのインデックス
-        """
-        # インデックスに応じてサムネイルサイズを変更
-        old_thumbnail_size = self.thumbnail_size
-        
-        # 基本サイズを取得
-        self.thumbnail_size = self.base_thumbnail_sizes[index]
-        
-        # ページサイズを調整（密度に応じて）
-        if index == 0:  # 小
-            self.page_size = 100
-        elif index == 1:  # 中
-            self.page_size = 80
-        elif index == 2:  # 大
-            self.page_size = 50
-            
-        # ズームスライダーを更新
-        self.zoom_slider.setValue(self.thumbnail_size.width())
 
-        # サイズが変わった場合のみリフレッシュ
-        if old_thumbnail_size != self.thumbnail_size:
-            self.refresh()
-            
-    def on_zoom_changed(self, value):
-        """
-        ズームスライダーの値が変更されたときの処理
-        
-        Args:
-            value (int): スライダーの値（サムネイルの幅）
-        """
-        # スライダードラッグ中は実際に適用せず、値の表示のみ更新
-        pass
-        
-    def on_zoom_slider_released(self):
-        """ズームスライダーがリリースされたときの処理"""
-        # スライダーの現在の値を取得
-        value = self.zoom_slider.value()
-        
-        # 新しいサムネイルサイズを設定
-        old_size = self.thumbnail_size
-        new_size = QSize(value, value)
-        
-        if old_size != new_size:
-            self.thumbnail_size = new_size
-            
-            # ページサイズを再計算（サムネイルサイズに反比例）
-            base_size = 150  # 基準サイズ
-            scale_factor = base_size / value
-            self.page_size = max(30, int(80 * scale_factor))
-            
-            # ビューを更新
-            self.refresh()
-    
-    def resizeEvent(self, event):
-        """
-        リサイズイベント処理
-
-        フローレイアウトは自動的に調整されるため、
-        リサイズイベント後に可視サムネイルのチェックをトリガーします。
-
-        Args:
-            event: リサイズイベント
-        """
-        super().resizeEvent(event)
-        
-        # 可視性チェックをデバウンスして実行
-        self.pending_resize = True
-        self.resize_timer.start()
-        
-    def on_resize_timeout(self):
-        """リサイズタイムアウト時の処理"""
-        if self.pending_resize:
-            # フローレイアウトは自動調整されるため、コンテンツ更新は不要
-            # 可視サムネイルの読み込みをトリガー
-            self.load_visible_thumbnails()
-            self.pending_resize = False
-        
-    def setup_ui(self):
-        """UIコンポーネントを設定"""
-        # メインレイアウト
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # スクロールエリア
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setFrameShape(QFrame.NoFrame)
-
-        # コンテンツウィジェット
-        self.content_widget = QWidget()
-        
-        # FlowLayoutを使用
-        self.flow_layout = FlowLayout(self.content_widget)
-        self.flow_layout.setSpacing(10)  # アイテム間のスペース
-        self.flow_layout.setContentsMargins(10, 10, 10, 10)
-        
-        self.scroll_area.setWidget(self.content_widget)
-
-        # 上部コントロールエリア
-        top_controls = QHBoxLayout()
-
-        # 表示密度選択
-        density_label = QLabel("表示密度:")
-        self.density_combo = QComboBox()
-        self.density_combo.addItems(["小", "中", "大"])
-        self.density_combo.setCurrentIndex(1)  # デフォルトは「中」
-        self.density_combo.currentIndexChanged.connect(self.on_density_changed)
-
-        # ズームスライダー
-        zoom_label = QLabel("ズーム:")
-        self.zoom_slider = QSlider(Qt.Horizontal)
-        self.zoom_slider.setMinimum(self.min_thumbnail_size)
-        self.zoom_slider.setMaximum(self.max_thumbnail_size)
-        self.zoom_slider.setValue(self.thumbnail_size.width())
-        self.zoom_slider.setTickPosition(QSlider.TicksBelow)
-        self.zoom_slider.setTickInterval(20)
-        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
-        self.zoom_slider.sliderReleased.connect(self.on_zoom_slider_released)
-        
-        # スライダーのサイズポリシー設定
-        self.zoom_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.zoom_slider.setMaximumWidth(200)  # 最大幅を制限
-
-        top_controls.addWidget(density_label)
-        top_controls.addWidget(self.density_combo)
-        top_controls.addSpacing(20)
-        top_controls.addWidget(zoom_label)
-        top_controls.addWidget(self.zoom_slider)
-        top_controls.addStretch()
-
-        # ページネーションコントロール
-        page_controls = QHBoxLayout()
-        self.prev_button = QPushButton("前へ")
-        self.page_label = QLabel("0 / 0")
-        self.next_button = QPushButton("次へ")
-
-        self.prev_button.clicked.connect(self.prev_page)
-        self.next_button.clicked.connect(self.next_page)
-
-        page_controls.addWidget(self.prev_button)
-        page_controls.addWidget(self.page_label)
-        page_controls.addWidget(self.next_button)
-        page_controls.addStretch()
-
-        # レイアウトに追加
-        layout.addLayout(top_controls)
-        layout.addWidget(self.scroll_area)
-        layout.addLayout(page_controls)
-
-        # デフォルトでボタンを無効化
-        self.prev_button.setEnabled(False)
-        self.next_button.setEnabled(False)
+# --- END REFACTORED views/flow_grid_view.py ---

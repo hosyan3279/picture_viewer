@@ -1,17 +1,18 @@
+# --- START REFACTORED views/enhanced_grid_view.py ---
 """
 拡張グリッドビューモジュール
 
 効率的なサムネイル表示のための拡張グリッドビュークラスを提供します。
 """
 from PySide6.QtWidgets import (
-    QLabel, QGridLayout, QHBoxLayout, QComboBox,
-    QSlider, QSizePolicy, QFrame
+    QLabel, QGridLayout, QFrame # Removed unused imports like QHBoxLayout, QComboBox, QSlider, QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer, QSize, QRect, QPoint
 from PySide6.QtGui import QResizeEvent
 
 from .base_image_grid_view import BaseImageGridView
 from .lazy_image_label import LazyImageLabel
+from utils import logger # Import logger
 
 class EnhancedGridView(BaseImageGridView):
     """
@@ -20,7 +21,7 @@ class EnhancedGridView(BaseImageGridView):
     遅延読み込みとスクロール連動による最適化機能を持つグリッドビュー。
     ページネーションと表示密度の調整にも対応しています。
     """
-    
+
     def __init__(self, image_model, worker_manager, parent=None):
         """
         初期化
@@ -30,326 +31,246 @@ class EnhancedGridView(BaseImageGridView):
             worker_manager: ワーカーマネージャー
             parent: 親ウィジェット
         """
+        # Initialize Base Class (handles common UI, timers, size logic)
         super().__init__(image_model, worker_manager, parent)
-        
-        # 設定
-        self.columns = 4  # 初期列数
-        self.page_size = 32  # 一度に表示する画像の数
-        
-        # サムネイルサイズの設定 (基本サイズ、最小、最大)
-        self.base_thumbnail_sizes = {
-            0: QSize(100, 100),  # 小
-            1: QSize(150, 150),  # 中
-            2: QSize(200, 200)   # 大
-        }
-        self.min_thumbnail_size = 80
-        self.max_thumbnail_size = 300
-        self.thumbnail_size = self.base_thumbnail_sizes[1]  # デフォルトは「中」
-        
-        self.load_batch_size = 8  # 一度に読み込む画像の数
 
-        # リサイズデバウンス用タイマー
-        self.resize_timer = QTimer(self)
-        self.resize_timer.setSingleShot(True)
-        self.resize_timer.setInterval(200)  # 200ms
-        self.resize_timer.timeout.connect(self.apply_resize)
-        
-        # 最後のリサイズパラメータを保存
-        self.last_width = 0
-        self.pending_resize = False
-        
-        # スクロールエリアの設定
-        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        # --- Grid Specific Settings ---
+        # Columns are calculated dynamically based on size and density
+        self.columns = self.config.get(f"display.grid_columns.{self._get_density_key()}", 4)
+        self.load_batch_size = self.config.get("workers.load_batch_size", 8)
 
-        # 拡張UIコンポーネント
-        self.setup_enhanced_ui()
+        # --- Grid Layout ---
+        self.grid_layout = QGridLayout(self.content_widget) # Use the content_widget from base class
+        spacing = self.config.get("display.ui.grid_spacing", 5)
+        margins = self.config.get("display.ui.grid_margins", 10)
+        self.grid_layout.setSpacing(spacing)
+        self.grid_layout.setContentsMargins(margins, margins, margins, margins)
+        # Make the last column and row stretchable if needed? Usually not for fixed grids.
+        # self.grid_layout.setColumnStretch(self.columns, 1) # Example if needed
 
-        # 可視ラベルの読み込みを定期的にチェック
-        self.load_timer = QTimer(self)
-        self.load_timer.setInterval(150)  # 150ms間隔
-        self.load_timer.timeout.connect(self.load_visible_thumbnails)
-        self.load_timer.start()
-        
-        # グリッドレイアウトを作成
-        self.grid_layout = QGridLayout(self.content_widget)
-        self.grid_layout.setSpacing(5)
-        self.grid_layout.setContentsMargins(10, 10, 10, 10)
-    
-    def setup_enhanced_ui(self):
-        """拡張UIコンポーネントを設定"""
-        # 上部コントロールエリアをレイアウトの最初に追加
-        top_controls = QHBoxLayout()
-        self.layout().insertLayout(0, top_controls)
+        # --- Visibility Check Timer ---
+        # Use a separate timer for loading visible items if needed, or rely on scroll debounce
+        self.visibility_check_timer = QTimer(self)
+        vis_check_interval = self.config.get("display.ui.visibility_check_interval_ms", 150)
+        self.visibility_check_timer.setInterval(vis_check_interval)
+        self.visibility_check_timer.timeout.connect(self.load_visible_images) # Connect to the correct method
+        self.visibility_check_timer.start()
 
-        # 表示密度選択
-        density_label = QLabel("表示密度:")
-        self.density_combo = QComboBox()
-        self.density_combo.addItems(["小", "中", "大"])
-        self.density_combo.setCurrentIndex(1)  # デフォルトは「中」
-        self.density_combo.currentIndexChanged.connect(self.on_density_changed)
+        # Initial calculation of columns
+        # QTimer.singleShot(0, self.calculate_columns) # Calculate after layout is established
+        self.calculate_columns() # Calculate initially
 
-        # ズームスライダー
-        zoom_label = QLabel("ズーム:")
-        self.zoom_slider = QSlider(Qt.Horizontal)
-        self.zoom_slider.setMinimum(self.min_thumbnail_size)
-        self.zoom_slider.setMaximum(self.max_thumbnail_size)
-        self.zoom_slider.setValue(self.thumbnail_size.width())
-        self.zoom_slider.setTickPosition(QSlider.TicksBelow)
-        self.zoom_slider.setTickInterval(20)
-        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
-        self.zoom_slider.sliderReleased.connect(self.on_zoom_slider_released)
-        
-        # スライダーのサイズポリシー設定
-        self.zoom_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.zoom_slider.setMaximumWidth(200)  # 最大幅を制限
+        logger.debug("EnhancedGridView initialized.")
 
-        top_controls.addWidget(density_label)
-        top_controls.addWidget(self.density_combo)
-        top_controls.addSpacing(20)
-        top_controls.addWidget(zoom_label)
-        top_controls.addWidget(self.zoom_slider)
-        top_controls.addStretch()
-    
-    def place_images(self, images):
-        """
-        画像をグリッドに配置
-        
-        Args:
-            images (list): 画像パスのリスト
-        """
+    def _get_density_key(self) -> str:
+        """Helper to get density key string."""
+        return {0: "small", 1: "medium", 2: "large"}.get(self.current_density_index, "medium")
+
+    # --- Overridden Abstract Methods ---
+
+    def place_images(self, images: list):
+        """画像をグリッドに配置 (Implementation)"""
+        logger.debug(f"Placing {len(images)} images in grid layout.")
+        # Ensure layout is empty before placing new items
+        self.clear_grid_widgets() # Clear only widgets, not self.image_labels yet
+
         for i, image_path in enumerate(images):
             row, col = divmod(i, self.columns)
 
-            # 遅延読み込みラベルを作成
+            # Create lazy loading label
+            # Ensure thumbnail_size is current before creating label
             label = LazyImageLabel(image_path, self.thumbnail_size)
+            label.image_clicked.connect(self.on_image_click) # Connect click signal
 
-            # シグナルを接続
-            label.image_clicked.connect(self.on_image_click)
+            # Add to grid layout
+            self.grid_layout.addWidget(label, row, col, Qt.AlignCenter) # Align center
 
-            # グリッドに追加
-            self.grid_layout.addWidget(label, row, col)
-
-            # マッピングを保存
+            # Store mapping (overwrites if path exists, which shouldn't happen with clear_grid)
             self.image_labels[image_path] = label
-    
-    def load_visible_thumbnails(self):
-        """可視状態のサムネイルを読み込む"""
-        if not self.image_labels:
-            return
+        # Adjust layout after adding widgets
+        self.grid_layout.activate()
+        self.content_widget.adjustSize() # Adjust content widget size based on layout
 
-        # 表示領域を取得 (少し上下に余裕を持たせる)
-        viewport = self.scroll_area.viewport()
-        visible_rect = viewport.rect().adjusted(0, -self.thumbnail_size.height(), 0, self.thumbnail_size.height())
 
-        labels_to_load = []
-        for image_path, label in self.image_labels.items():
-            # ラベルが有効か確認
-            if not label or label.parent() is None:
-                continue
+    def load_visible_images(self):
+        """可視状態のサムネイルを読み込む (Implementation)"""
+        if not self.image_labels or not self.isVisible(): # Check if widget is visible
+             return
 
-            # 読み込み状態を確認
-            if label.loading_state == LazyImageLabel.STATE_NOT_LOADED:
-                # ラベルの位置をビューポート座標系に変換
-                try:
-                    label_rect_in_viewport = QRect(label.mapTo(viewport, QPoint(0, 0)), label.size())
+        try:
+            # Get viewport geometry in global coordinates
+            viewport = self.scroll_area.viewport()
+            if not viewport: return # Skip if viewport not ready
+            # Get visible rectangle within the scroll area's viewport
+            visible_rect_local = viewport.rect()
+            # logger.debug(f"Viewport rect: {visible_rect_local}")
 
-                    # 可視領域内にあるかチェック
-                    if visible_rect.intersects(label_rect_in_viewport):
-                        labels_to_load.append((image_path, label))
-                except RuntimeError as e:
-                    # mapToでエラーが発生することがある（ウィジェット削除中など）
-                    print(f"DEBUG: Error mapping label for {image_path}: {e}")
-                    continue # エラーの場合はスキップ
+            # Define a buffer zone (e.g., one row above and below)
+            buffer_y = self.thumbnail_size.height() + self.grid_layout.spacing()
+            extended_visible_rect = visible_rect_local.adjusted(0, -buffer_y, 0, buffer_y)
 
-        # 読み込むラベルがなければ終了
-        if not labels_to_load:
-            return
+            labels_to_load = []
+            processed_count = 0
+            max_process = 200 # Limit checks per cycle to avoid freezing
 
-        # 指定数のラベルだけ読み込む
-        load_count = 0
-        for path, label in labels_to_load:
-            if load_count >= self.load_batch_size:
-                break
+            for image_path, label in self.image_labels.items():
+                processed_count += 1
+                if processed_count > max_process:
+                     logger.warning("Visibility check limit reached, will continue next cycle.")
+                     break
 
-            # 念のため再度状態を確認
-            if label.loading_state == LazyImageLabel.STATE_NOT_LOADED:
-                # 読み込み中状態に設定
-                label.setLoadingState(LazyImageLabel.STATE_LOADING)
+                # Check if label is valid and not already loaded/loading
+                if not label or label.parent() is None or label.loading_state != LazyImageLabel.STATE_NOT_LOADED:
+                    continue
 
-                # サムネイル読み込みをリクエスト
-                self.thumbnail_needed.emit(path, self.thumbnail_size)
-                load_count += 1
-    
+                # Get label geometry relative to the content_widget
+                label_rect_in_content = label.geometry()
+                # Map the top-left corner to the viewport coordinate system
+                label_top_left_in_viewport = label.mapTo(viewport, QPoint(0, 0))
+                label_rect_in_viewport = QRect(label_top_left_in_viewport, label_rect_in_content.size())
+
+                # Check for intersection with the extended visible rectangle
+                if extended_visible_rect.intersects(label_rect_in_viewport):
+                    labels_to_load.append((image_path, label))
+
+                    # Limit the number of loads initiated per cycle
+                    if len(labels_to_load) >= self.load_batch_size:
+                        break # Stop collecting once batch size is reached
+
+
+            # Request thumbnails for the collected labels
+            if labels_to_load:
+                 logger.debug(f"Requesting thumbnails for {len(labels_to_load)} visible labels.")
+                 for path, label_widget in labels_to_load:
+                     if label_widget.loading_state == LazyImageLabel.STATE_NOT_LOADED:
+                         label_widget.setLoadingState(LazyImageLabel.STATE_LOADING)
+                         self.thumbnail_needed.emit(path, self.thumbnail_size) # Emit signal with current size
+
+        except Exception as e:
+            # Catch potential errors during mapping or geometry checks
+            logger.error(f"Error during load_visible_images: {e}", exc_info=True)
+
     def clear_grid(self):
-        """グリッドをクリア"""
-        # 読み込みタイマーを一時停止
-        self.load_timer.stop()
-        self.scroll_debounce_timer.stop()
+        """グリッドをクリア (Implementation)"""
+        logger.debug("Clearing grid.")
+        # Stop timers related to loading/checking
+        self.visibility_check_timer.stop()
+        self.scroll_debounce_timer.stop() # Stop scroll timer as well
 
+        self.clear_grid_widgets() # Remove widgets first
+
+        # Clear internal state AFTER removing widgets
         self.image_labels.clear()
+        self.pending_updates.clear() # Clear pending updates as well
 
-        # グリッド内のすべてのウィジェットを削除
-        while self.grid_layout.count():
+        # Restart timers
+        self.visibility_check_timer.start()
+
+
+    def clear_grid_widgets(self):
+         """Helper to remove all widgets from the grid layout."""
+         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             widget = item.widget()
             if widget:
+                # Disconnect signals to avoid issues during deletion? Maybe not needed.
                 widget.deleteLater()
-        
-        # 読み込みタイマーを再開
-        self.load_timer.start()
-    
-    def process_updates(self, update_keys):
-        """
-        サムネイル更新をバッチ処理
-        
-        Args:
-            update_keys (list): 更新する画像パスのリスト
-        """
+
+    def process_updates(self, update_keys: list):
+        """サムネイル更新をバッチ処理 (Implementation)"""
+        logger.debug(f"Processing {len(update_keys)} thumbnail updates.")
         batch_count = 0
-        
+        max_batch = 20 # Limit updates per cycle
+
         for image_path in update_keys:
-            if batch_count >= 10:  # 1回の更新で最大10件まで
-                break
-                
-            if image_path in self.image_labels:
-                thumbnail = self.pending_updates[image_path]
+            if batch_count >= max_batch:
+                 logger.debug(f"Update batch limit ({max_batch}) reached.")
+                 break
+
+            if image_path in self.image_labels and image_path in self.pending_updates:
+                thumbnail_or_error = self.pending_updates[image_path]
                 label = self.image_labels[image_path]
-                
-                # ラベルが存在し、サムネイルが有効な場合のみ更新
-                if label and not thumbnail.isNull():
-                    label.set_thumbnail(thumbnail)
+
+                if label and label.parent() is not None: # Check if label still exists
+                    if thumbnail_or_error == "ERROR":
+                         label.setLoadingState(LazyImageLabel.STATE_ERROR)
+                    elif not thumbnail_or_error.isNull():
+                         # Ensure the label size matches the current thumbnail_size if needed
+                         if label.size() != self.thumbnail_size:
+                             label.update_size(self.thumbnail_size) # Update label size if density/zoom changed
+                         label.set_thumbnail(thumbnail_or_error) # This sets state to LOADED
+                    else:
+                         # Handle case where thumbnail is unexpectedly null but not marked as error
+                         logger.warning(f"Received null thumbnail for {image_path}, marking as error.")
+                         label.setLoadingState(LazyImageLabel.STATE_ERROR)
                     batch_count += 1
-                elif label and thumbnail.isNull():
-                    label.setLoadingState(LazyImageLabel.STATE_ERROR)
-                    batch_count += 1
-                
-                # 処理済みの項目を削除
-                del self.pending_updates[image_path]
-        
-        # 更新があった場合はレイアウトを調整
+                else:
+                     logger.debug(f"Label for {image_path} no longer exists, skipping update.")
+            # No need to remove from pending_updates here, base class handles it
+
+
+        # Update layout if changes were made (might not be necessary if labels handle own updates)
         if batch_count > 0:
-            self.update()
-    
-    def on_density_changed(self, index):
-        """
-        表示密度変更時の処理
+            # self.grid_layout.activate() # May force unnecessary relayout
+            self.content_widget.update() # Request repaint
+            pass
 
-        Args:
-            index (int): コンボボックスのインデックス
-        """
-        # インデックスに応じてサムネイルサイズと列数を変更
-        old_thumbnail_size = self.thumbnail_size
-        
-        # 基本サイズを取得
-        self.thumbnail_size = self.base_thumbnail_sizes[index]
-        
-        if index == 0:  # 小
-            self.columns = 6
-            self.page_size = 48
-        elif index == 1:  # 中
-            self.columns = 4
-            self.page_size = 32
-        elif index == 2:  # 大
-            self.columns = 3
-            self.page_size = 24
-            
-        # ズームスライダーを更新
-        self.zoom_slider.setValue(self.thumbnail_size.width())
 
-        # サイズが変わった場合のみリフレッシュ
-        if old_thumbnail_size != self.thumbnail_size:
-            self.refresh()
-            
-    def on_zoom_changed(self, value):
-        """
-        ズームスライダーの値が変更されたときの処理
-        
-        Args:
-            value (int): スライダーの値（サムネイルの幅）
-        """
-        # スライダードラッグ中は実際に適用せず、値の表示のみ更新
-        pass
-        
-    def on_zoom_slider_released(self):
-        """ズームスライダーがリリースされたときの処理"""
-        # スライダーの現在の値を取得
-        value = self.zoom_slider.value()
-        
-        # 新しいサムネイルサイズを設定
-        old_size = self.thumbnail_size
-        new_size = QSize(value, value)
-        
-        if old_size != new_size:
-            self.thumbnail_size = new_size
-            
-            # 列数を再計算
-            self.calculate_columns()
-            
-            # ビューを更新
-            self.refresh()
-    
-    def calculate_columns(self):
-        """利用可能な幅に基づいて列数を計算"""
-        width = self.width()
-        
-        # マージンとスペーシングを考慮して列数を計算
-        thumbnail_width = self.thumbnail_size.width()
-        spacing = self.grid_layout.spacing()
-        margins = self.grid_layout.contentsMargins()
-        available_width = width - margins.left() - margins.right()
-        
-        # 利用可能な幅を考慮して列数を計算
-        new_columns = max(1, available_width // (thumbnail_width + spacing))
-        
-        # 密度に基づく最小列数と最大列数の制限
-        density_idx = self.density_combo.currentIndex()
-        if density_idx == 0:  # 小
-            min_columns = 4
-            max_columns = 8
-        elif density_idx == 1:  # 中
-            min_columns = 3
-            max_columns = 6
-        else:  # 大
-            min_columns = 2
-            max_columns = 4
-        
-        # 最終的な列数
-        self.columns = max(min_columns, min(new_columns, max_columns))
-        
-        # ページサイズを調整（列数×行数で計算）
-        target_rows = 5  # 目標表示行数
-        self.page_size = self.columns * target_rows
-            
-    def resizeEvent(self, event):
-        """
-        リサイズイベント処理
-
-        ウィンドウサイズに応じて列数を動的に調整します。
-
-        Args:
-            event: リサイズイベント
-        """
-        super().resizeEvent(event)
-        
-        # リサイズ中は高頻度の更新を避けるためにデバウンスする
-        self.last_width = self.width()
-        self.pending_resize = True
-        self.resize_timer.start()
-        
-    def apply_resize(self):
-        """リサイズ適用（デバウンス後）"""
-        if not self.pending_resize:
-            return
-            
-        # 列数を再計算
+    # --- Overridden Resize Handling ---
+    def handle_resize(self, event: QResizeEvent):
+        """リサイズ適用（デバウンス後） - 列数を再計算"""
+        super().handle_resize(event) # Call base class handler (optional)
+        logger.debug("EnhancedGridView handling resize.")
         old_columns = self.columns
         self.calculate_columns()
-        
-        # 列数が変わった場合のみ更新
+
+        # Refresh the view only if the number of columns changed
         if old_columns != self.columns:
+            logger.info(f"Columns changed from {old_columns} to {self.columns} due to resize. Refreshing.")
             self.refresh()
-            
-        self.pending_resize = False
-        
-        # リサイズ後にも可視性チェックをトリガー
-        self.load_visible_thumbnails()
+        # else:
+        #     # Even if columns don't change, trigger visibility check as items might have shifted
+        #     self.load_visible_images()
+
+
+    # --- Grid Specific Methods ---
+    def calculate_columns(self):
+        """利用可能な幅に基づいて列数を計算"""
+        try:
+            # Use viewport width for calculation as it excludes scrollbar
+            viewport_width = self.scroll_area.viewport().width()
+            margins = self.grid_layout.contentsMargins()
+            available_width = viewport_width - margins.left() - margins.right()
+
+            thumbnail_width = self.thumbnail_size.width()
+            spacing = self.grid_layout.horizontalSpacing() # Use horizontal spacing
+
+            if thumbnail_width + spacing <= 0: # Avoid division by zero
+                effective_item_width = 1
+            else:
+                effective_item_width = thumbnail_width + spacing
+
+            new_columns = max(1, available_width // effective_item_width)
+
+            # Density-based min/max limits (consider making configurable)
+            density_key = self._get_density_key()
+            min_cols = self.config.get(f"display.grid_min_columns.{density_key}", {"small": 4, "medium": 3, "large": 2}.get(density_key, 1))
+            max_cols = self.config.get(f"display.grid_max_columns.{density_key}", {"small": 8, "medium": 6, "large": 4}.get(density_key, 10))
+
+
+            self.columns = max(min_cols, min(new_columns, max_cols))
+            logger.debug(f"Calculated columns: {self.columns} (Available Width: {available_width}, Thumb Width: {thumbnail_width}, Spacing: {spacing})")
+
+            # Adjust page size based on columns (optional, could be fixed per density)
+            target_rows = self.config.get("display.grid_target_rows", 5)
+            new_page_size = self.columns * target_rows
+            if self.page_size != new_page_size:
+                self.page_size = new_page_size
+                logger.debug(f"Adjusted page size based on columns: {self.page_size}")
+
+
+        except Exception as e:
+            logger.error(f"Error calculating columns: {e}", exc_info=True)
+            self.columns = max(1, self.columns) # Fallback to previous or 1
+
+# --- END REFACTORED views/enhanced_grid_view.py ---
