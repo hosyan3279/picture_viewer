@@ -6,6 +6,7 @@
 import os
 import gc
 import psutil
+from .logger import logger
 
 class MemoryMonitor:
     """
@@ -25,6 +26,7 @@ class MemoryMonitor:
         """
         self.memory_threshold = memory_threshold
         self.process = psutil.Process(os.getpid())
+        logger.debug("MemoryMonitor initialized with threshold: %d%%", memory_threshold)
     
     def get_memory_usage(self):
         """
@@ -33,20 +35,40 @@ class MemoryMonitor:
         Returns:
             dict: メモリ使用状況の情報
         """
-        # プロセスのメモリ情報
-        memory_info = self.process.memory_info()
-        
-        # システム全体のメモリ情報
-        system_memory = psutil.virtual_memory()
-        
-        return {
-            'process_rss': memory_info.rss,  # プロセスの物理メモリ使用量（バイト）
-            'process_vms': memory_info.vms,  # プロセスの仮想メモリ使用量（バイト）
-            'process_percent': self.process.memory_percent(),  # プロセスのメモリ使用率（%）
-            'system_total': system_memory.total,  # システム全体のメモリ量（バイト）
-            'system_available': system_memory.available,  # システムの空きメモリ量（バイト）
-            'system_percent': system_memory.percent,  # システムのメモリ使用率（%）
-        }
+        try:
+            # プロセスのメモリ情報
+            memory_info = self.process.memory_info()
+            
+            # システム全体のメモリ情報
+            system_memory = psutil.virtual_memory()
+            
+            result = {
+                'process_rss': memory_info.rss,  # プロセスの物理メモリ使用量（バイト）
+                'process_vms': memory_info.vms,  # プロセスの仮想メモリ使用量（バイト）
+                'process_percent': self.process.memory_percent(),  # プロセスのメモリ使用率（%）
+                'system_total': system_memory.total,  # システム全体のメモリ量（バイト）
+                'system_available': system_memory.available,  # システムの空きメモリ量（バイト）
+                'system_percent': system_memory.percent,  # システムのメモリ使用率（%）
+            }
+            
+            logger.debug(
+                "Memory usage - Process: %.1f%%, System: %.1f%%", 
+                result['process_percent'], 
+                result['system_percent']
+            )
+            
+            return result
+        except Exception as e:
+            logger.error("Error getting memory usage: %s", str(e))
+            # 基本的な情報のみを含むフォールバック辞書を返す
+            return {
+                'process_rss': 0,
+                'process_vms': 0,
+                'process_percent': 0,
+                'system_total': 0,
+                'system_available': 0,
+                'system_percent': 0,
+            }
     
     def optimize_if_needed(self):
         """
@@ -59,6 +81,11 @@ class MemoryMonitor:
         
         # メモリ使用率が閾値を超えている場合
         if memory_usage['process_percent'] > self.memory_threshold:
+            logger.info(
+                "Memory usage exceeds threshold (%.1f%% > %d%%). Optimizing memory...",
+                memory_usage['process_percent'],
+                self.memory_threshold
+            )
             self.optimize_memory()
             return True
         
@@ -68,8 +95,23 @@ class MemoryMonitor:
         """
         メモリ最適化を実行
         """
+        logger.debug("Starting memory optimization")
+        
+        # 最適化前のメモリ使用量を記録
+        before = self.get_memory_usage()['process_rss']
+        
         # 未使用オブジェクトのガベージコレクションを実行
-        gc.collect()
+        collected = gc.collect()
+        logger.debug("Garbage collection completed: %d objects collected", collected)
+        
+        # 最適化後のメモリ使用量を記録
+        after = self.get_memory_usage()['process_rss']
+        saved = before - after if before > after else 0
+        
+        logger.info(
+            "Memory optimization completed. Saved: %s", 
+            self.format_memory_size(saved)
+        )
         
         # キャッシュのクリアなど、他の最適化処理をここに実装可能
     
@@ -83,13 +125,17 @@ class MemoryMonitor:
         Returns:
             str: 読みやすい形式のサイズ文字列
         """
-        # バイト → キロバイト → メガバイト → ギガバイト
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size_bytes < 1024.0 or unit == 'TB':
-                break
-            size_bytes /= 1024.0
-        
-        return f"{size_bytes:.2f} {unit}"
+        try:
+            # バイト → キロバイト → メガバイト → ギガバイト
+            for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                if size_bytes < 1024.0 or unit == 'TB':
+                    break
+                size_bytes /= 1024.0
+            
+            return f"{size_bytes:.2f} {unit}"
+        except Exception as e:
+            logger.error("Error formatting memory size: %s", str(e))
+            return f"{size_bytes} B"
     
     def get_formatted_memory_info(self):
         """
@@ -98,11 +144,23 @@ class MemoryMonitor:
         Returns:
             dict: 整形されたメモリ情報
         """
-        memory_usage = self.get_memory_usage()
-        
-        return {
-            'process_memory': self.format_memory_size(memory_usage['process_rss']),
-            'process_percent': f"{memory_usage['process_percent']:.1f}%",
-            'system_memory': f"{self.format_memory_size(memory_usage['system_available'])} / {self.format_memory_size(memory_usage['system_total'])}",
-            'system_percent': f"{memory_usage['system_percent']:.1f}%",
-        }
+        try:
+            memory_usage = self.get_memory_usage()
+            
+            result = {
+                'process_memory': self.format_memory_size(memory_usage['process_rss']),
+                'process_percent': f"{memory_usage['process_percent']:.1f}%",
+                'system_memory': f"{self.format_memory_size(memory_usage['system_available'])} / {self.format_memory_size(memory_usage['system_total'])}",
+                'system_percent': f"{memory_usage['system_percent']:.1f}%",
+            }
+            
+            logger.debug("Formatted memory info: %s", result)
+            return result
+        except Exception as e:
+            logger.error("Error getting formatted memory info: %s", str(e))
+            return {
+                'process_memory': 'N/A',
+                'process_percent': 'N/A',
+                'system_memory': 'N/A',
+                'system_percent': 'N/A',
+            }

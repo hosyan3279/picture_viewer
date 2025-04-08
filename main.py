@@ -4,14 +4,41 @@
 画像ビューワーアプリケーションを起動します。
 """
 import sys
+import os
+import logging
 from PySide6.QtWidgets import QApplication
 from views.main_window import MainWindow
+from utils import (
+    logger, initialize_file_logging, enable_debug_logging,
+    get_config, configure_vips
+)
 
 def main():
     """アプリケーションのメイン関数"""
+    # 設定の初期化
+    config = get_config()
+    app_data_dir = config.get("app.data_dir")
+    
+    # ロギングの初期化
+    log_dir = os.path.join(app_data_dir, "logs")
+    initialize_file_logging(log_dir)
+    
+    # デバッグモードの場合はデバッグログを有効化
+    if "--debug" in sys.argv or config.get("app.debug_mode"):
+        enable_debug_logging()
+        logger.debug("デバッグモードで起動しました")
+        # 設定をデバッグ出力
+        logger.debug(f"アプリケーション設定: データディレクトリ={app_data_dir}")
+    
+    # libvipsの設定を適用
+    configure_vips()
+    logger.info(f"libvips設定を適用しました")
+    
+    logger.info("アプリケーションを起動しています")
+    
     # アプリケーションの作成
     app = QApplication(sys.argv)
-    app.setApplicationName("画像ビューワー")
+    app.setApplicationName(config.get("app.name"))
     
     # スタイルシートの設定（オプション）
     app.setStyleSheet("""
@@ -56,10 +83,16 @@ def main():
         }
     """)
     
+    # ウィンドウサイズの取得
+    window_size = config.get("app.window_size")
+    
+    logger.info("メインウィンドウを作成しています")
     # メインウィンドウの作成と表示
     window = MainWindow()
+    window.resize(*window_size)
     window.show()
     
+    logger.info("イベントループを開始します")
     # イベントループの開始
     sys.exit(app.exec())
 

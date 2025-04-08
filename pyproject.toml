@@ -1,9 +1,36 @@
 [project]
 name = "picture-viewer"
 version = "0.1.0"
-description = "Add your description here"
+description = "効率的な画像表示と管理のためのPySide6ベースの画像ビューワーアプリケーション"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "PySide6>=6.0.0",
     "pyvips>=2.2.3",
+    "psutil>=5.9.0",
+    "Pillow>=10.0.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-qt>=4.2.0",
+    "mypy>=1.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# 明示的なパッケージの指定
+packages = ["controllers", "models", "utils", "views"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+check_untyped_defs = true
+no_implicit_reexport = true
+warn_return_any = true
